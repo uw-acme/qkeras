@@ -360,3 +360,233 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
 
   def get_prunable_weights(self):
     return []
+
+
+class QLayerNormalization(LayerNormalization, PrunableLayer):
+    """Quantized Batch Normalization layer.
+
+    """
+
+    def __init__(self,
+                 axis=-1,
+                 epsilon=1e-3,
+                 center=True,
+                 scale=True,
+                 activation=None,
+                 beta_initializer='zeros',
+                 gamma_initializer='ones',
+                 beta_regularizer=None,
+                 gamma_regularizer=None,
+                 beta_quantizer='quantized_po2(5)',
+                 gamma_quantizer='quantized_relu_po2(6, 2048)',
+                 mean_quantizer='quantized_po2(5)',
+                 variance_quantizer='quantized_relu_po2(6, quadratic_approximation=True)',
+                 beta_constraint=None,
+                 gamma_constraint=None,
+                 beta_range=None,
+                 gamma_range=None,
+                 **kwargs):
+
+        if gamma_range is not None:
+            warnings.warn('gamma_range is deprecated in QLayerNormalization layer.')
+
+        if beta_range is not None:
+            warnings.warn('beta_range is deprecated in QLayerNormalization layer.')
+
+        self.gamma_range = gamma_range
+        self.beta_range = beta_range
+        self.activation = activation
+
+        self.beta_quantizer = beta_quantizer
+        self.gamma_quantizer = gamma_quantizer
+        self.mean_quantizer = mean_quantizer
+        self.variance_quantizer = variance_quantizer
+
+        self.beta_quantizer_internal = get_quantizer(self.beta_quantizer)
+        self.gamma_quantizer_internal = get_quantizer(self.gamma_quantizer)
+        self.mean_quantizer_internal = get_quantizer(self.mean_quantizer)
+        self.variance_quantizer_internal = get_quantizer(self.variance_quantizer)
+
+        if hasattr(self.gamma_quantizer_internal, '_set_trainable_parameter'):
+            self.gamma_quantizer_internal._set_trainable_parameter()
+        if hasattr(self.variance_quantizer_internal, '_set_trainable_parameter'):
+            self.variance_quantizer_internal._set_trainable_parameter()
+
+        self.quantizers = [
+            self.gamma_quantizer_internal,
+            self.beta_quantizer_internal,
+            self.mean_quantizer_internal,
+            self.variance_quantizer_internal
+        ]
+
+        if scale and self.gamma_quantizer:
+            gamma_constraint, gamma_initializer = (
+                get_auto_range_constraint_initializer(
+                    self.gamma_quantizer_internal,
+                    gamma_constraint,
+                    gamma_initializer)
+            )
+
+        if center and self.beta_quantizer:
+            beta_constraint, beta_initializer = (
+                get_auto_range_constraint_initializer(
+                    self.beta_quantizer_internal,
+                    beta_constraint,
+                    beta_initializer)
+            )
+
+        if kwargs.get('fused', None):
+            warnings.warn('layer normalization fused is disabled '
+                          'in qkeras qnormalization.py.')
+            del kwargs['fused']
+
+        super(QLayerNormalization, self).__init__(
+            axis=axis,
+            epsilon=epsilon,
+            center=center,
+            scale=scale,
+            activation=activation,
+            beta_initializer=beta_initializer,
+            gamma_initializer=gamma_initializer,
+            beta_regularizer=beta_regularizer,
+            gamma_regularizer=gamma_regularizer,
+            beta_quantizer=beta_quantizer,
+            gamma_quantizer=gamma_quantizer,
+            beta_constraint=beta_constraint,
+            gamma_constraint=gamma_constraint,
+            beta_range=beta_range,
+            gamma_range=gamma_range,
+            fused=False,
+            **kwargs)
+
+    def call(self, inputs, training=None):
+
+        if self.scale and self.gamma_quantizer:
+            quantized_gamma = self.gamma_quantizer_internal(self.gamma)
+        else:
+            quantized_gamma = self.gamma
+
+        if self.center and self.beta_quantizer:
+          quantized_beta = self.beta_quantizer_internal(self.beta)
+        else:
+          quantized_beta = self.beta
+
+        # if self.mean_quantizer:
+        #     quantized_moving_mean = self.mean_quantizer_internal(self.moving_mean)
+        # else:
+        #     quantized_moving_mean = self.moving_mean
+        #
+        # if self.variance_quantizer:
+        #     quantized_moving_variance = self.variance_quantizer_internal(
+        #         self.moving_variance)
+        # else:
+        #     quantized_moving_variance = self.moving_variance
+
+        # Compute the axes along which to reduce the mean / variance
+        input_shape = inputs.shape
+        ndims = len(input_shape)
+
+        # Broadcasting only necessary for norm when the axis is not just
+        # the last dimension
+        broadcast_shape = [1] * ndims
+        for dim in self.axis:
+            broadcast_shape[dim] = input_shape.dims[dim].value
+
+        def _broadcast(v):
+            if (v is not None and len(v.shape) != ndims and self.axis != [ndims - 1]):
+                return array_ops.reshape(v, broadcast_shape)
+            return v
+
+        scale, offset = _broadcast(quantized_gamma), _broadcast(quantized_beta)
+
+        if offset is not None:
+            offset = math_ops.cast(offset, inputs.dtype)
+        if scale is not None:
+            scale = math_ops.cast(scale, inputs.dtype)
+
+        keep_dims = len(self.axis) > 1
+        mean, variance = tf.compat.v1.nn.moments(inputs, self.axis, keep_dims=keep_dims)
+
+        # Quantized mean and variance
+        if self.mean_quantizer:
+            quantized_mean = self.mean_quantizer_internal(mean)
+        else:
+            quantized_mean = mean
+
+        if self.variance_quantizer:
+            quantized_variance = self.variance_quantizer_internal(variance)
+        else:
+            quantized_variance = variance
+
+        quantized_mean = _broadcast(math_ops.cast(quantized_mean, inputs.dtype))
+        quantized_variance = _broadcast(math_ops.cast(quantized_variance, inputs.dtype))
+
+        outputs = nn.batch_normalization(inputs,
+                                         quantized_mean,
+                                         quantized_variance,
+                                         offset,
+                                         scale,
+                                         self.epsilon)
+        outputs.set_shape(input_shape)
+
+        return outputs
+
+    def get_config(self):
+        config = {
+            'axis': self.axis,
+            'epsilon': self.epsilon,
+            'center': self.center,
+            'scale': self.scale,
+            'beta_quantizer': constraints.serialize(
+                self.beta_quantizer_internal, use_legacy_format=True
+            ),
+            'gamma_quantizer': constraints.serialize(
+                self.gamma_quantizer_internal, use_legacy_format=True
+            ),
+            'mean_quantizer': constraints.serialize(
+                self.mean_quantizer_internal, use_legacy_format=True
+            ),
+            'variance_quantizer': constraints.serialize(
+                self.variance_quantizer_internal, use_legacy_format=True
+            ),
+            'beta_initializer': initializers.serialize(
+                self.beta_initializer, use_legacy_format=True
+            ),
+            'gamma_initializer': initializers.serialize(
+                self.gamma_initializer, use_legacy_format=True
+            ),
+            # 'moving_mean_initializer': initializers.serialize(
+            #     self.moving_mean_initializer, use_legacy_format=True
+            # ),
+            # 'moving_variance_initializer': initializers.serialize(
+            #     self.moving_variance_initializer, use_legacy_format=True
+            # ),
+            # 'inverse_quantizer': initializers.serialize(
+            #     self.inverse_quantizer_internal, use_legacy_format=True
+            # ),
+            'beta_regularizer': regularizers.serialize(
+                self.beta_regularizer, use_legacy_format=True
+            ),
+            'gamma_regularizer': regularizers.serialize(
+                self.gamma_regularizer, use_legacy_format=True
+            ),
+            'beta_constraint': constraints.serialize(
+                self.beta_constraint, use_legacy_format=True
+            ),
+            'gamma_constraint': constraints.serialize(
+                self.gamma_constraint, use_legacy_format=True
+            ),
+            'beta_range': self.beta_range,
+            'gamma_range': self.gamma_range,
+        }
+        base_config = super(QBatchNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def get_quantizers(self):
+        return self.quantizers
+
+    def get_prunable_weights(self):
+        return []
