@@ -412,18 +412,12 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
             epsilon=epsilon,
             center=center,
             scale=scale,
-            activation=activation,
             beta_initializer=beta_initializer,
             gamma_initializer=gamma_initializer,
             beta_regularizer=beta_regularizer,
             gamma_regularizer=gamma_regularizer,
-            beta_quantizer=beta_quantizer,
-            gamma_quantizer=gamma_quantizer,
             beta_constraint=beta_constraint,
             gamma_constraint=gamma_constraint,
-            beta_range=beta_range,
-            gamma_range=gamma_range,
-            fused=False,
             **kwargs)
 
     def call(self, inputs, training=None):

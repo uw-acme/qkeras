@@ -393,7 +393,7 @@ def generate_layer_data_type_map(graph, source_quantizer_list, is_inference,
           operation_count
       )
 
-    elif node_type in ["QBatchNormalization", "BatchNormalization"]:
+    elif node_type in ["QBatchNormalization", "BatchNormalization", "QLayerNormalization", "LayerNormalization"]:
 
       (input_quantizer, _) = input_qe_list[0]
 

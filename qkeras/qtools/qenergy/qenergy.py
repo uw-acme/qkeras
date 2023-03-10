@@ -120,7 +120,7 @@ def parameter_read_energy(
 
   node_type = layer.__class__.__name__
   rd_energy = 0
-  if node_type in ["QBatchNormalization", "BatchNormalization"]:
+  if node_type in ["QBatchNormalization", "BatchNormalization", "QLayerNormalization", "LayerNormalization"]:
     gamma_quantizer = layer_item["gamma_quantizer"]
     beta_quantizer = layer_item["beta_quantizer"]
     mean_quantizer = layer_item["mean_quantizer"]
@@ -259,9 +259,9 @@ def energy_estimate(model, layer_map, weights_on_memory,
     if layer.__class__.__name__ in ["QActivation", "QAdaptiveActivation", "Activation"]:
       pass
 
-    # QBN Layer
+    # QBN and QLN Layer
     elif layer.__class__.__name__ in [
-        "QBatchNormalization", "BatchNormalization"]:
+        "QBatchNormalization", "BatchNormalization", "QLayerNormalization", "LayerNormalization"]:
       # assume QBN is embedded with conv/dense layers
       # -> no memory read/write cost
 

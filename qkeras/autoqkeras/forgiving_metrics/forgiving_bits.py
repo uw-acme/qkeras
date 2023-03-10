@@ -76,6 +76,24 @@ class ForgivingFactorBits(ForgivingFactor):
         bits = 5
         index = int(bool(layer.scale))
         parameter_size += bits * np.prod(layer.get_weights()[index].shape)
+    elif layer.__class__.__name__ in ["LayerNormalization"]:
+      # scale
+      index = -1
+      parameter_size += t_size * np.prod(layer.get_weights()[index].shape)
+      # center (bias)
+      if layer.center:
+        index = int(bool(layer.scale))
+        parameter_size += t_size * np.prod(layer.get_weights()[index].shape)
+    elif layer.__class__.__name__ in ["QLayerNormalization"]:
+      # scale
+      index = -1
+      bits = 6
+      parameter_size += bits * np.prod(layer.get_weights()[index].shape)
+      # center (bias)
+      if layer.center:
+        bits = 5
+        index = int(bool(layer.scale))
+        parameter_size += bits * np.prod(layer.get_weights()[index].shape)
     return parameter_size
 
   def _act_size(self, layer):

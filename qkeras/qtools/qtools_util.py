@@ -133,7 +133,8 @@ def get_operation_count(layer, input_shape):
     operation_count = np.prod(output_shape[1:])
 
   elif ("Activation" in layer.__class__.__name__ or
-        "BatchNormalization" in layer.__class__.__name__):
+        "BatchNormalization" in layer.__class__.__name__ or
+        "LayerNormalization" in layer.__class__.__name__):
     operation_count = np.prod(input_shape[1:])
 
   elif layer.__class__.__name__ in ["QConv2D", "Conv2D", "QConv2DBatchnorm"]:

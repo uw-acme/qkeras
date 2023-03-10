@@ -135,7 +135,7 @@ def map_to_json(mydict):
     layer_item["layer_type"] = layer.__class__.__name__
 
     if layer_item["layer_type"] in [
-        "QBatchNormalization", "BatchNormalization"]:
+        "QBatchNormalization", "BatchNormalization", "QLayerNormalization", "LayerNormalization"]:
       layer_item["input_quantizer_list"] = [
           populate_quantizer(q) for q in feature["input_quantizer_list"]]
 

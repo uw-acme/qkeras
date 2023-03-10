@@ -52,6 +52,8 @@ class ConfigClass:
     self.include_energy["Activation"] = ["outputs"]
     self.include_energy["QBatchNormalization"] = ["parameters"]
     self.include_energy["BatchNormalization"] = ["parameters"]
+    self.include_energy["QLayerNormalization"] = ["parameters"]
+    self.include_energy["LayerNormalization"] = ["parameters"]
     self.include_energy["Add"] = ["op_cost"]
     self.include_energy["Subtract"] = ["op_cost"]
     self.include_energy["MaxPooling2D"] = ["op_cost"]

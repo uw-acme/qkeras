@@ -32,7 +32,8 @@ def print_qmodel_summary(q_model):
       print("{:20} {}".format(layer.name, str(layer.activation)))
     elif (
         hasattr(layer, "get_quantizers") and
-        layer.__class__.__name__ != "QBatchNormalization"
+        layer.__class__.__name__ != "QBatchNormalization" and
+        layer.__class__.__name__ != "QLayerNormalization"
     ):
       print("{:20} ".format(layer.name), end="")
       if "Dense" in layer.__class__.__name__:
@@ -62,6 +63,13 @@ def print_qmodel_summary(q_model):
       print()
     elif layer.__class__.__name__ == "BatchNormalization":
       print("{:20} is normal keras bn layer".format(layer.name), end="")
+      print()
+    elif layer.__class__.__name__ == "QLayerNormalization":
+      print("{:20} QLN, mean={}".format(layer.name,
+          str(tf.keras.backend.eval(layer.mean))), end="")
+      print()
+    elif layer.__class__.__name__ == "LayerNormalization":
+      print("{:20} is normal keras ln layer".format(layer.name), end="")
       print()
 
   print()

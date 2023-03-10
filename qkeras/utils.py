@@ -58,6 +58,7 @@ from .qconvolutional import QSeparableConv1D
 from .qconvolutional import QSeparableConv2D
 from .qconvolutional import QDepthwiseConv2D
 from .qnormalization import QBatchNormalization
+from .qnormalization import QLayerNormalization
 from .qpooling import QGlobalAveragePooling2D
 from .qtools import qgraph
 from .quantizers import binary
@@ -91,6 +92,7 @@ REGISTERED_LAYERS = [
     "QGRU",
     "QBidirectional",
     "QBatchNormalization",
+    "QLayerNormalization",
     "QConv2DBatchnorm",
     "QDepthwiseConv2DBatchnorm",
     "QAveragePooling2D",
@@ -778,6 +780,36 @@ def model_quantize(model,
       layer_config["mean_quantizer"] = mean_quantizer
       layer_config["variance_quantizer"] = variance_quantizer
 
+    elif layer["class_name"] == "LayerNormalization":
+      # We will assume at least QBatchNormalization or
+      # layer name is in dictionary to enable conversion
+      # otherwise we will just skip it.
+      if (
+          layer_config["name"] not in quantizer_config and
+          "QLayerNormalization" not in quantizer_config
+      ):
+        continue
+
+      layer["class_name"] = "QLayerNormalization"
+      # Needs to add kernel/bias quantizers.
+      gamma_quantizer = get_config(
+          quantizer_config, layer, "QLayerNormalization",
+          "gamma_quantizer")
+      beta_quantizer = get_config(
+          quantizer_config, layer, "QLayerNormalization",
+          "beta_quantizer")
+      mean_quantizer = get_config(
+          quantizer_config, layer, "QLayerNormalization",
+          "mean_quantizer")
+      variance_quantizer = get_config(
+          quantizer_config, layer, "QLayerNormalization",
+          "variance_quantizer")
+
+      layer_config["gamma_quantizer"] = gamma_quantizer
+      layer_config["beta_quantizer"] = beta_quantizer
+      layer_config["mean_quantizer"] = mean_quantizer
+      layer_config["variance_quantizer"] = variance_quantizer
+
     elif layer["class_name"] in ["AveragePooling2D", "GlobalAveragePooling2D"]:
       q_name = "Q" + layer["class_name"]
       # Adds the average quanizer to config.
@@ -836,6 +868,7 @@ def _add_supported_quantized_objects(custom_objects):
   custom_objects["QActivation"] = QActivation
   custom_objects["QAdaptiveActivation"] = QAdaptiveActivation
   custom_objects["QBatchNormalization"] = QBatchNormalization
+  custom_objects["QLayerNormalization"] = QLayerNormalization
   custom_objects["Clip"] = Clip
   custom_objects["quantized_bits"] = quantized_bits
   custom_objects["bernoulli"] = bernoulli
