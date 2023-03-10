@@ -1,3 +1,4 @@
+# Lint as: python3
 # ==============================================================================
 # Copyright 2020 Google LLC
 #
@@ -82,7 +83,16 @@ class ForgivingFactorBits(ForgivingFactor):
     i_size = self.input_bits
     o_size = self.output_bits
     t_size = self.ref_bits
-    output_size = np.prod(layer.output.shape[1:])
+    keraslist = layer.output
+    print((keraslist))
+    if (isinstance(keraslist, list)):
+      kerasShape = [0]
+    else:
+      kerasShape = keraslist.shape[1:]
+    print(kerasShape)
+    output_size = np.prod(kerasShape)
+    #print(output_size)
+    #output_size = np.prod(layer.output_shape)
     # we compute activation sizes for inputs and outputs
     if layer.__class__.__name__ in ["InputLayer"]:
       return i_size * output_size

@@ -17,7 +17,6 @@
 import collections
 import copy
 import numpy as np
-import sys
 
 import networkx as nx
 from qkeras.qtools import qgraph
@@ -25,8 +24,7 @@ from qkeras.qtools import qtools_util
 from qkeras.qtools import quantized_operators
 from qkeras.qtools.quantized_operators import quantizer_factory as quantizer_factory_module
 from qkeras.qtools.settings import cfg
-from qkeras.qtools.quantized_operators import adder_factory
-from qkeras.qtools.quantized_operators.fused_bn_factory import FusedBNFactory
+
 
 class TagMissingError(ValueError):
   pass
@@ -57,6 +55,8 @@ QKERAS_LAYERS = [
     "QConv1D",
     "QConv2D",
     "QDepthwiseConv2D",
+    "QSeparableConv2D",
+    "QOctaveConv2D",
 ]
 
 KERAS_LAYERS = [
@@ -64,102 +64,9 @@ KERAS_LAYERS = [
     "Conv1D",
     "Conv2D",
     "DepthwiseConv2D",
+    "SeparableConv2D",
+    "OctaveConv2D",
 ]
-
-
-def get_bn_quantizers(layer, quantizer_factory, cfg, keras_quantizer,
-                      input_quantizer, is_inference, for_reference,
-                      model_weights_already_quantized):
-  """Extract quantizers from a given batchnorm layer."""
-
-  # QKeras layers might be mixed with keras layers.
-  if for_reference or not hasattr(layer, "get_quantizers"):
-    # Keras BatchNorm layer mixed with quantized model
-    # -> no reference mode
-    gamma_quantizer = quantizer_factory.make_default_quantizer(
-        mode=cfg.default_interm_quantizer)
-    beta_quantizer = quantizer_factory.make_default_quantizer(
-        mode=cfg.default_interm_quantizer)
-    mean_quantizer = quantizer_factory.make_default_quantizer(
-        mode=cfg.default_interm_quantizer)
-    variance_quantizer = quantizer_factory.make_default_quantizer(
-        mode=cfg.default_interm_quantizer)
-    inverse_quantizer = quantizer_factory.make_default_quantizer(
-        mode=cfg.default_interm_quantizer)
-
-    if keras_quantizer:
-      gamma_quantizer = quantizer_factory.make_default_quantizer(
-          mode=keras_quantizer)
-      beta_quantizer = quantizer_factory.make_default_quantizer(
-          mode=keras_quantizer)
-      mean_quantizer = quantizer_factory.make_default_quantizer(
-          mode=keras_quantizer)
-      variance_quantizer = quantizer_factory.make_default_quantizer(
-          mode=keras_quantizer)
-      inverse_quantizer = quantizer_factory.make_default_quantizer(
-          mode=keras_quantizer)
-  else:
-    (qkeras_gamma_quantizer, qkeras_beta_quantizer,
-     qkeras_mean_quantizer, qkeras_variance_quantizer,
-     qkeras_inverse_quantizer) = layer.get_quantizers()
-
-    if not qkeras_beta_quantizer:
-      beta_quantizer = quantizer_factory.clone_quantizer(input_quantizer)
-    else:
-      beta_quantizer = quantizer_factory.make_quantizer(
-          qkeras_beta_quantizer)
-
-    if not qkeras_mean_quantizer:
-      mean_quantizer = quantizer_factory.clone_quantizer(input_quantizer)
-    else:
-      mean_quantizer = quantizer_factory.make_quantizer(
-          qkeras_mean_quantizer)
-
-    if not qkeras_variance_quantizer:
-      variance_quantizer = quantizer_factory.make_default_quantizer(
-          mode=cfg.default_interm_quantizer)
-    else:
-      # If variance is float, convert to input_quantizer.
-      variance_quantizer = quantizer_factory.make_quantizer(
-          qkeras_variance_quantizer)
-
-    if not qkeras_gamma_quantizer:
-      gamma_quantizer = quantizer_factory.make_default_quantizer(
-          mode=cfg.default_interm_quantizer)
-    else:
-      gamma_quantizer = quantizer_factory.make_quantizer(
-          qkeras_gamma_quantizer)
-
-    if not qkeras_inverse_quantizer:
-      inverse_quantizer = quantizer_factory.make_default_quantizer(
-          mode=cfg.default_interm_quantizer)
-    else:
-      inverse_quantizer = quantizer_factory.make_quantizer(
-          qkeras_inverse_quantizer)
-
-  # During inference, gamma, beta and variance are constants
-  # if they are po2 quantizers, we need to modify their bits
-  # with actual values and also update graph with the
-  # corresponding output_quantizer on the edge.
-  if is_inference:
-    weights = qtools_util.get_weights(
-        layer, model_weights_already_quantized)
-    # If no scale(gamma), num_weights --
-    # If no center(beta_quantizer) num_weights --
-    num_weights = 4
-    if not layer.scale:
-      num_weights -= 1
-    if not layer.center:
-      num_weights -= 1
-
-    if (layer.scale and gamma_quantizer is not None and gamma_quantizer.is_po2):
-      gamma_quantizer.update_inference_values(weights[0])
-    if (variance_quantizer is not None and variance_quantizer.is_po2):
-      variance_quantizer.update_inference_values(
-          weights[num_weights-1])
-
-  return (gamma_quantizer, beta_quantizer, mean_quantizer, variance_quantizer,
-          inverse_quantizer)
 
 
 def update_output_quantizer_in_graph(graph, node_id, quantizer_factory,
@@ -184,12 +91,9 @@ def update_output_quantizer_in_graph(graph, node_id, quantizer_factory,
   return output_quantizer
 
 
-def generate_layer_data_type_map(
-    graph, source_quantizer_list, is_inference,
-    keras_quantizer=None, keras_accumulator=None,
-    for_reference=False, debug=False,
-    model_weights_already_quantized=True,
-    hw_weight_dict=None):
+def generate_layer_data_type_map(graph, source_quantizer_list, is_inference,
+                                 keras_quantizer=None, keras_accumulator=None,
+                                 for_reference=False, debug=False):
   """main funciton to generate datatype for each layer.
 
   For each type of layer, this function calculates the sizes and minimum
@@ -206,12 +110,6 @@ def generate_layer_data_type_map(
       accumulator and output
     for_reference: whether to generate a map for a baseline model
     debug: whether to print debug messages
-    model_weights_already_quantized: bool. If model weights are already
-      quantized, no need to apply quantizer to weights here in this function.
-    hw_weight_dict: weight dictonary for hardware inference. For example, fused
-      bn op inference in hardware will need additional fused weights, which
-      can be extracted from this dictionary. This dictionary is the output from
-      utils.py/model_save_quantized_weights function.
 
   Returns:
     a result containing the following fields:
@@ -250,7 +148,6 @@ def generate_layer_data_type_map(
     w_shapes = None
     b_shapes = None
     output_shapes = None
-    qkeras_weight_quantizer = None
 
     if hasattr(layer, "output_shape"):
       output_shapes = layer.output_shape
@@ -373,7 +270,7 @@ def generate_layer_data_type_map(
         "GlobalAveragePooling2D", "QAveragePooling2D",
         "QGlobalAveragePooling2D"]:
       (input_quantizer, _) = input_qe_list[0]
-      qtools_average_quantizer = None
+
       # This is a hack. We don't want to implement a new accumulator class
       # just for averagpooling. So we re-use accumulator type in conv/dense
       # layers which need multiplier and kernel as input parameters.
@@ -444,15 +341,18 @@ def generate_layer_data_type_map(
       output_quantizer = update_output_quantizer_in_graph(
           graph, node_id, quantizer_factory, layer_quantizer, for_reference)
 
-      layer_data_type_map[layer] = {
-          "input_quantizer_list": input_quantizer_list,
-          "average_quantizer": qtools_average_quantizer,
-          "pool_sum_accumulator": accumulator,
-          "pool_avg_multiplier": multiplier,
-          "output_quantizer": output_quantizer,
-          "output_shapes": output_shapes,
-          "operation_count": operation_count
-      }
+      layer_data_type_map[layer] = LayerDataType(
+          input_quantizer_list,
+          multiplier,
+          accumulator,
+          None,
+          None,
+          None,
+          None,
+          output_quantizer,
+          output_shapes,
+          operation_count
+      )
 
     # If it's a Quantized Activation layer.
     elif node_type in ["QActivation", "QAdaptiveActivation", "Activation"]:
@@ -494,112 +394,168 @@ def generate_layer_data_type_map(
       )
 
     elif node_type in ["QBatchNormalization", "BatchNormalization"]:
-      # If this batchnorm layer needs to be fused with the previous layer,
-      # we pass the input quantizer type as the output type in qraph.
 
       (input_quantizer, _) = input_qe_list[0]
 
-      if  (hw_weight_dict is not None and
-           hw_weight_dict[layer.name]["enable_bn_fusing"]):
-        if for_reference and keras_accumulator and not is_input_layer:
-          input_quantizer = quantizer_factory.make_default_quantizer(
-              mode=keras_accumulator)
-        output_quantizer = update_output_quantizer_in_graph(
-            graph, node_id, quantizer_factory, input_quantizer, for_reference)
-        layer_data_type_map[layer] = {
-          "input_quantizer_list": input_quantizer_list,
-          "output_quantizer": output_quantizer,
-          "output_shapes": input_shape,
-          "operation_count": operation_count
-        }
+      # QKeras layers might be mixed with keras layers.
+      if for_reference or not hasattr(layer, "get_quantizers"):
+        # Keras BatchNorm layer mixed with quantized model
+        # -> no reference mode
+        gamma_quantizer = quantizer_factory.make_default_quantizer(
+            mode=cfg.default_interm_quantizer)
+        beta_quantizer = quantizer_factory.make_default_quantizer(
+            mode=cfg.default_interm_quantizer)
+        mean_quantizer = quantizer_factory.make_default_quantizer(
+            mode=cfg.default_interm_quantizer)
+        variance_quantizer = quantizer_factory.make_default_quantizer(
+            mode=cfg.default_interm_quantizer)
+
+        if keras_quantizer:
+          gamma_quantizer = quantizer_factory.make_default_quantizer(
+              mode=keras_quantizer)
+          beta_quantizer = quantizer_factory.make_default_quantizer(
+              mode=keras_quantizer)
+          mean_quantizer = quantizer_factory.make_default_quantizer(
+              mode=keras_quantizer)
+          variance_quantizer = quantizer_factory.make_default_quantizer(
+              mode=keras_quantizer)
       else:
-        (gamma_quantizer, beta_quantizer, mean_quantizer, variance_quantizer,
-         _) = get_bn_quantizers(layer, quantizer_factory, cfg, keras_quantizer,
-                                input_quantizer, is_inference, for_reference,
-                                model_weights_already_quantized)
+        (qkeras_gamma_quantizer, qkeras_beta_quantizer, qkeras_mean_quantizer,
+         qkeras_variance_quantizer) = layer.get_quantizers()
 
-        qbn = quantized_operators.QBNFactory()
-        qbn.make_quantizer(
-            input_quantizer, gamma_quantizer, beta_quantizer,
-            mean_quantizer, variance_quantizer, layer.scale, layer.center
-        )
+        if not qkeras_beta_quantizer:
+          beta_quantizer = quantizer_factory.clone_quantizer(input_quantizer)
+        else:
+          beta_quantizer = quantizer_factory.make_quantizer(
+              qkeras_beta_quantizer)
 
-        def set_output(op, output):
-          if op:
-            op.output = output
+        if not qkeras_mean_quantizer:
+          mean_quantizer = quantizer_factory.clone_quantizer(input_quantizer)
+        else:
+          mean_quantizer = quantizer_factory.make_quantizer(
+              qkeras_mean_quantizer)
 
-        if for_reference or not hasattr(layer, "get_quantizers"):
+        if not qkeras_variance_quantizer:
+          variance_quantizer = quantizer_factory.make_default_quantizer(
+              mode=cfg.default_interm_quantizer)
+        else:
+          # If gamma is float, convert to input_quantizer.
+          variance_quantizer = quantizer_factory.make_quantizer(
+              qkeras_variance_quantizer)
+
+        if not qkeras_gamma_quantizer:
+          gamma_quantizer = quantizer_factory.make_default_quantizer(
+              mode=cfg.default_interm_quantizer)
+        else:
+          gamma_quantizer = quantizer_factory.make_quantizer(
+              qkeras_gamma_quantizer)
+
+      # During inference, gamma, beta and variance are constants
+      # if they are po2 quantizers, we need to modify their bits
+      # with actual values and also update graph with the
+      # corresponding output_quantizer on the edge.
+      if is_inference:
+        weights = qtools_util.get_weights(layer)
+        # If no scale(gamma), num_weights --
+        # If no center(beta_quantizer) num_weights --
+        num_weights = 4
+        if not layer.scale:
+          num_weights -= 1
+        if not layer.center:
+          num_weights -= 1
+
+        if layer.scale and gamma_quantizer.is_po2:
+          gamma_quantizer.update_inference_values(weights[0])
+        if variance_quantizer.is_po2:
+          variance_quantizer.update_inference_values(
+              weights[num_weights-1])
+
+      qbn = quantized_operators.QBNFactory()
+      qbn.make_quantizer(
+          input_quantizer, gamma_quantizer, beta_quantizer,
+          mean_quantizer, variance_quantizer, layer.scale, layer.center
+      )
+
+      def set_output(op, output):
+        if op:
+          op.output = output
+
+      if for_reference or not hasattr(layer, "get_quantizers"):
+        set_output(
+            qbn.internal_divide_quantizer,
+            quantizer_factory.make_default_quantizer(
+                mode=cfg.default_interm_quantizer))
+
+        set_output(
+            qbn.internal_multiplier,
+            quantizer_factory.make_default_quantizer(
+                mode=cfg.default_interm_quantizer))
+
+        set_output(
+            qbn.internal_accumulator,
+            quantizer_factory.make_default_quantizer(
+                mode=cfg.default_interm_quantizer))
+
+        set_output(
+            qbn.internal_output,
+            quantizer_factory.make_default_quantizer(
+                mode=cfg.default_interm_quantizer))
+
+        if keras_accumulator:
           set_output(
               qbn.internal_divide_quantizer,
-              quantizer_factory.make_default_quantizer(
-                  mode=cfg.default_interm_quantizer))
+              quantizer_factory.make_default_quantizer(mode=keras_accumulator))
 
           set_output(
               qbn.internal_multiplier,
-              quantizer_factory.make_default_quantizer(
-                  mode=cfg.default_interm_quantizer))
+              quantizer_factory.make_default_quantizer(mode=keras_accumulator))
 
           set_output(
               qbn.internal_accumulator,
-              quantizer_factory.make_default_quantizer(
-                  mode=cfg.default_interm_quantizer))
+              quantizer_factory.make_default_quantizer(mode=keras_accumulator))
 
           set_output(
-              qbn.internal_output,
-              quantizer_factory.make_default_quantizer(
-                  mode=cfg.default_interm_quantizer))
+              qbn.internal_output.output,
+              quantizer_factory.make_default_quantizer(mode=keras_accumulator))
 
-          if keras_accumulator:
-            set_output(
-                qbn.internal_divide_quantizer,
-                quantizer_factory.make_default_quantizer(mode=keras_accumulator))
+      layer_quantizer = qbn.internal_output.output
 
-            set_output(
-                qbn.internal_multiplier,
-                quantizer_factory.make_default_quantizer(mode=keras_accumulator))
+      output_quantizer = update_output_quantizer_in_graph(
+          graph, node_id, quantizer_factory, layer_quantizer, for_reference)
 
-            set_output(
-                qbn.internal_accumulator,
-                quantizer_factory.make_default_quantizer(mode=keras_accumulator))
+      gamma_range = None
+      if hasattr(layer, "gamma_range"):
+        gamma_range = layer.gamma_range
 
-            set_output(
-                qbn.internal_output.output,
-                quantizer_factory.make_default_quantizer(mode=keras_accumulator))
+      beta_range = None
+      if hasattr(layer, "beta_range"):
+        beta_range = layer.beta_range
 
-        gamma_range = None
-        if hasattr(layer, "gamma_range"):
-          gamma_range = layer.gamma_range
+      if not layer.center:
+        qbn.beta_quantizer = None
 
-        beta_range = None
-        if hasattr(layer, "beta_range"):
-          beta_range = layer.beta_range
+      if not layer.scale:
+        qbn.gamma_quantizer = None
 
-        if not layer.center:
-          qbn.beta_quantizer = None
+      layer_data_type_map[layer] = {
+          "input_quantizer_list": input_quantizer_list,
+          "gamma_quantizer": gamma_quantizer,
+          "beta_quantizer": beta_quantizer,
+          "mean_quantizer": mean_quantizer,
+          "variance_quantizer": variance_quantizer,
+          "gamma_range": gamma_range,
+          "beta_range": beta_range,
+          "internal_divide_quantizer": qbn.internal_divide_quantizer,
+          "internal_multiplier": qbn.internal_multiplier,
+          "internal_accumulator": qbn.internal_accumulator,
+          "output_quantizer": output_quantizer,
+          "output_shapes": input_shape,
+          "operation_count": operation_count
+      }
 
-        if not layer.scale:
-          qbn.gamma_quantizer = None
-
-        layer_quantizer = qbn.internal_output.output
-        output_quantizer = update_output_quantizer_in_graph(
-            graph, node_id, quantizer_factory, layer_quantizer, for_reference)
-        layer_data_type_map[layer] = {
-            "input_quantizer_list": input_quantizer_list,
-            "gamma_quantizer": gamma_quantizer,
-            "beta_quantizer": beta_quantizer,
-            "mean_quantizer": mean_quantizer,
-            "variance_quantizer": variance_quantizer,
-            "gamma_range": gamma_range,
-            "beta_range": beta_range,
-            "internal_divide_quantizer": qbn.internal_divide_quantizer,
-            "internal_multiplier": qbn.internal_multiplier,
-            "internal_accumulator": qbn.internal_accumulator,
-            "output_quantizer": output_quantizer,
-            "output_shapes": input_shape,
-            "operation_count": operation_count
-        }
     # If qdense, qconv, qpool, qoctave
     elif node_type in QKERAS_LAYERS or node_type in KERAS_LAYERS:
+
       (input_quantizer, _) = input_qe_list[0]
 
       if for_reference or not hasattr(layer, "get_quantizers"):
@@ -640,8 +596,7 @@ def generate_layer_data_type_map(
       #  need to update corresponding quantizer type with min and max
       #  of the constant values.
       if is_inference:
-        weights = qtools_util.get_weights(
-            layer, model_weights_already_quantized)
+        weights = qtools_util.get_weights(layer)
         if weight_quantizer.is_po2:
           weight_quantizer.update_inference_values(weights[0])
 
@@ -652,43 +607,16 @@ def generate_layer_data_type_map(
       multiplier = multiplier_factory.make_multiplier(
           weight_quantizer, input_quantizer)
 
-      enable_bn_fusing = (
-          hw_weight_dict is not None and hw_weight_dict.get(layer.name, None)
-          and hw_weight_dict[layer.name].get("enable_bn_fusing", None))
-
-      if enable_bn_fusing and qkeras_weight_quantizer:
-        # When conv layer is fused wiht bn, multiplier bitwidth is ajusted by
-        # kernel quantizer scale values (for auto_po2 type of quantizer only).
-        # For conv layer without fusing, multiplier bitwidth is not adjusted
-        # even if auto_po2 is used in quantizer. Instead, we directly adjusted
-        # the accumulator and store that in fused_accumulator.
-        qtools_util.adjust_multiplier_for_auto_po2(
-            multiplier, qkeras_weight_quantizer)
-
       weights = layer.get_weights()
       kernel = weights[0]
 
-      kernel_shape = kernel.shape
-      # depthwise_kernel_shape = kernel_size + (input_dim, depth_multiplier)
-      # When computing accumulator bitwidth for dw conv2d layer, we do not
-      # need to count the last two dimensions
-      if node_type in ["QDepthwiseConv2D", "DepthwiseConv2D"]:
-        kernel_shape = kernel.shape[:-2] + (1, 1)
-
-      kernel_accumulator_factory = quantized_operators.AccumulatorFactory()
-      # Sets use_bias=False so that the accumulator doesn't account for bias
-      # bitwdith.
-      kernel_accumulator = kernel_accumulator_factory.make_accumulator(
-          kernel_shape, multiplier, use_bias=False)
+      accumulator_factory = quantized_operators.AccumulatorFactory()
+      accumulator = accumulator_factory.make_accumulator(
+          kernel.shape, multiplier)
 
       if not layer.use_bias:
         bias_quantizer = None
-        accumulator = kernel_accumulator
-      else:
-        # Add bias quantizer bitwidth to the overall accumulator
-        bias_accumulator_instance = adder_factory.IAdder()
-        accumulator = bias_accumulator_instance.make_quantizer(
-            kernel_accumulator.output, bias_quantizer)
+
       if debug:
         print(layer.name or "None")
         print("weight_quantizer:", weight_quantizer.bits)
@@ -709,94 +637,26 @@ def generate_layer_data_type_map(
           multiplier.output = quantizer_factory.make_default_quantizer(
               mode=keras_accumulator)
 
-      if enable_bn_fusing:
-        bn_layer_name = hw_weight_dict[layer.name]["fused_bn_layer_name"]
-        successor_ids = list(graph.successors(node_id))
-        bn_layer = graph.nodes[successor_ids[0]]["layer"][0]
-        assert bn_layer.name == bn_layer_name, (
-            "Batchnorm layer in the graph has different name from hw_weight"
-            f"_dict: {layer.name} vs {bn_layer_name}. Check both places to "
-            "ensure they are matching.")
+      layer_quantizer = accumulator.output
+      output_quantizer = update_output_quantizer_in_graph(
+          graph, node_id, quantizer_factory, layer_quantizer, for_reference)
 
-        # Add additional datatype for bn fused weights
-        (gamma_quantizer, beta_quantizer, mean_quantizer, variance_quantizer,
-         inverse_quantizer) = get_bn_quantizers(
-             bn_layer, quantizer_factory, cfg, keras_quantizer, input_quantizer,
-             is_inference, for_reference, model_weights_already_quantized)
+      layer_data_type_map[layer] = LayerDataType(
+          input_quantizer_list,
+          multiplier,
+          accumulator,
+          weight_quantizer,
+          w_shapes,
+          bias_quantizer,
+          b_shapes,
+          output_quantizer,
+          output_shapes,
+          operation_count
+      )
 
-        qkeras_inverse_quantizer = bn_layer.inverse_quantizer_internal
-        fused_bn = FusedBNFactory()
-        fused_bn.make_quantizer(
-            prev_output_quantizer=kernel_accumulator.output,
-            prev_bias_quantizer=bias_quantizer,
-            beta_quantizer=beta_quantizer,
-            mean_quantizer=mean_quantizer,
-            inverse_quantizer=inverse_quantizer,
-            use_beta=bn_layer.center,
-            use_bias=layer.use_bias,
-            qkeras_inverse_quantizer=qkeras_inverse_quantizer
-        )
-        if for_reference or not hasattr(layer, "get_quantizers"):
-          fused_bn.internal_accumulator.output = (
-              quantizer_factory.make_default_quantizer(
-                  mode=cfg.default_interm_quantizer))
-          if keras_accumulator:
-            fused_bn.internal_accumulator.output = (
-                quantizer_factory.make_default_quantizer(
-                    mode=keras_accumulator))
-          fused_bn.internal_output.output = fused_bn.internal_accumulator.output
-
-        layer_quantizer = fused_bn.internal_accumulator.output
-        output_quantizer = update_output_quantizer_in_graph(
-            graph, node_id, quantizer_factory, layer_quantizer, for_reference)
-        layer_data_type_map[layer] = {
-            "input_quantizer_list": input_quantizer_list,
-            "multiplier": multiplier,
-            "accumulator": accumulator,
-            "weight_quantizer": weight_quantizer,
-            "w_shapes": w_shapes,
-            "bias_quantizer": bias_quantizer,
-            "b_shapes": b_shapes,
-            "bn_inverse_quantizer": inverse_quantizer,
-            "bn_mean_quantizer": mean_quantizer,
-            "bn_beta_quantizer": beta_quantizer,
-            "fused_accumulator": fused_bn.internal_accumulator,
-            "output_quantizer": output_quantizer,
-            "output_shapes": output_shapes,
-            "operation_count": operation_count
-        }
-      else:
-        # Correct accumulator bitwith with the scale values from
-        # auto-po2 type of quantizers and store them in fused_accumulator.
-        if (
-            hasattr(qkeras_weight_quantizer, "__str__") and
-            "quantized_bits" in qkeras_weight_quantizer.__str__() and
-            qkeras_weight_quantizer.alpha == "auto_po2"):
-          fused_accumulator = qtools_util.adjust_accumulator_for_auto_po2(
-              layer, multiplier, qkeras_weight_quantizer, bias_quantizer)
-        else:
-          fused_accumulator = accumulator
-
-        layer_quantizer = accumulator.output
-        output_quantizer = update_output_quantizer_in_graph(
-            graph, node_id, quantizer_factory, layer_quantizer, for_reference)
-
-        layer_data_type_map[layer] = {
-            "input_quantizer_list": input_quantizer_list,
-            "multiplier": multiplier,
-            "accumulator": accumulator,
-            "weight_quantizer": weight_quantizer,
-            "w_shapes": w_shapes,
-            "bias_quantizer": bias_quantizer,
-            "b_shapes": b_shapes,
-            "fused_accumulator": fused_accumulator,
-            "output_quantizer": output_quantizer,
-            "output_shapes": output_shapes,
-            "operation_count": operation_count
-        }
+    # Folded conv/dense/depthwiseconv layer
     elif node_type in ["QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm"]:
-      # Datatype for Folded Conv/DepthwiseConv layer
-      # TODO(lishanok): Add additional support for Folded Dense layer
+
       (input_quantizer, _) = input_qe_list[0]
       if for_reference or not hasattr(layer, "get_quantizers"):
         # For_reference: force all quantizers to keras_quantizer.
@@ -839,8 +699,7 @@ def generate_layer_data_type_map(
       #  need to update corresponding quantizer type with min and max
       #  of the constant values
       if is_inference:
-        weights = qtools_util.get_weights(
-            layer, model_weights_already_quantized)
+        weights = qtools_util.get_weights(layer)
         if weight_quantizer.is_po2:
           weight_quantizer.update_inference_values(weights[0])
 
@@ -850,9 +709,7 @@ def generate_layer_data_type_map(
       multiplier_factory = quantized_operators.MultiplierFactory()
       multiplier = multiplier_factory.make_multiplier(
           weight_quantizer, input_quantizer)
-      if qkeras_weight_quantizer:
-        qtools_util.adjust_multiplier_for_auto_po2(
-            multiplier, qkeras_weight_quantizer)
+
       weights = layer.get_weights()
       kernel = weights[0]
 
@@ -861,7 +718,7 @@ def generate_layer_data_type_map(
           kernel.shape, multiplier, use_bias=True if bias_quantizer else False)
 
       if not bias_quantizer:
-        # Set bias the same as accumulator type.
+        # Sets bias the same as accumulator type.
         bias_quantizer = copy.deepcopy(accumulator.output)
         if not accumulator.output.is_floating_point:
           # For fixed point accumulator, needs to add 1 to its bits to avoid
@@ -900,10 +757,6 @@ def generate_layer_data_type_map(
     elif node_type:
       # Any other unsupported layer types -> pass the input quantizer
       # type to output in qraph
-      print(f"[WARNING] QTools cannot parse {node_type}. The input quatnizer"
-            " of this layer is directly passed through to the output!",
-            file=sys.stderr)
-
       (input_quantizer, _) = input_qe_list[0]
 
       if for_reference and keras_accumulator and not is_input_layer:

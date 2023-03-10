@@ -25,7 +25,8 @@ import re
 import networkx as nx
 import tensorflow as tf
 import tensorflow.keras.backend as K
-from keras.layers.core import TFOpLambda
+from tensorflow.keras import initializers
+from tensorflow.python.keras.layers.core import TFOpLambda
 
 from tensorflow.keras.models import Model
 from tensorflow.keras.models import model_from_json
@@ -35,6 +36,7 @@ from tensorflow_model_optimization.python.core.sparsity.keras import prune_regis
 from tensorflow_model_optimization.python.core.sparsity.keras import prunable_layer
 
 from .qlayers import Clip
+from .qdense_batchnorm import QDenseBatchnorm
 from .qconv2d_batchnorm import QConv2DBatchnorm
 from .qdepthwiseconv2d_batchnorm import QDepthwiseConv2DBatchnorm
 from .qlayers import QActivation
@@ -72,10 +74,7 @@ from .quantizers import stochastic_binary
 from .quantizers import stochastic_ternary
 from .quantizers import ternary
 
-
 from .safe_eval import safe_eval
-from tensorflow.python.ops import math_ops
-
 
 REGISTERED_LAYERS = [
     "QActivation",
@@ -96,129 +95,13 @@ REGISTERED_LAYERS = [
     "QDepthwiseConv2DBatchnorm",
     "QAveragePooling2D",
     "QGlobalAveragePooling2D",
+    "QDenseBatchnorm",
 ]
 
 
-def find_bn_fusing_layer_pair(model):
-  """Finds layers that can be fused with the following batchnorm layers.
-
-  Args:
-    model: input model
-
-  Returns:
-    Dict that marks all the layer pairs that need to be fused.
-
-  Note: supports sequential and non-sequential model
-  """
-
-  fold_model = clone_model(model)
-  (graph, _) = qgraph.GenerateGraphFromModel(
-      fold_model, "quantized_bits(8, 0, 1)", "quantized_bits(8, 0, 1)")
-
-  qgraph.GraphAddSingleSourceSingleSink(graph)
-  qgraph.GraphRemoveNodeWithNodeType(graph, "InputLayer")
-  qgraph.GraphPropagateActivationsToEdges(graph)
-
-  # Finds the Batchnorm nodes and mark them.
-  layers_followed_by_bn = {}
-  bn_layers_to_skip = set()
-  for node_id in nx.topological_sort(graph):
-    node = graph.nodes[node_id]
-    layer = node["layer"][0]
-    if layer:
-      successor_ids = list(graph.successors(node_id))
-      is_single = len(successor_ids) == 1
-      successor_layer = graph.nodes[successor_ids[0]]["layer"][0]
-      followed_by_bn = (successor_layer.__class__.__name__ ==
-                        "QBatchNormalization")
-      # TODO(lishanok): extend to QDense types
-      enable_bn_fusing = layer.__class__.__name__ in [
-          "QConv2D", "QDepthwiseConv2D"
-      ] and is_single and followed_by_bn
-
-      if enable_bn_fusing:
-        layers_followed_by_bn[layer.name] = successor_layer.name
-        bn_layers_to_skip.add(successor_layer.name)
-
-  return (layers_followed_by_bn, bn_layers_to_skip)
-
-
-def add_bn_fusing_weights(prev_layer, bn_layer, saved_weights):
-  """Adds additional fusing weights to saved_weights.
-
-  In hardware inference, we need to combined fuse previous layer's output with
-  the following batchnorm op.
-  z[i] = bn(y[i]) = inv[i] * y'[i] * scale[i] - bias'[i] is the final output
-  of the previous layer and bn layer, with:
-    inv[i] = gamma[i]* rsqrt(variance[i]^2+epsilon) is computed from the
-      bn layer weights
-    y'[i] is the i-th channel output from the previous layer (before scale)
-    scale[i] is the i-th channel kernel quantizer scale
-    fused_bias[i] = inv[i] * bias[i] + beta[i] - inv[i]*mean[i] where bias is
-      the bias term from the previous layer, beta and mean are the bn
-      layer weights.
-
-  Args:
-    prev_layer: QKeras layer, could be QConv2D/QDepthwiseConv2D/QDense.
-    bn_layer: The following QBatchNormalization layer that needs to be
-      fused with the previous layer.
-    saved_weights: Dict. The centralized weights dictionary that exports
-      relevant weights and parameters for hardware inference.
-  """
-  bn_qs = bn_layer.quantizers
-  bn_ws = bn_layer.get_weights()
-
-  if bn_qs[4] is not None:
-    assert bn_qs[0] is None and bn_qs[3] is None, (
-        "If using the inverse quantizer, the gamma and variance quantizers "
-        "should not be used in order to avoid quantizing a value twice.")
-
-  def apply_quantizer(quantizer, input_weight):
-    if quantizer:
-      weight = tf.constant(input_weight)
-      weight = tf.keras.backend.eval(quantizer(weight))
-    else:
-      weight = input_weight
-    return weight
-
-  # Quantize respective bn layer weights
-  gamma = 1.0
-  beta = 0
-  idx = 0
-  if bn_layer.scale:
-    gamma = apply_quantizer(bn_layer.gamma_quantizer_internal, bn_ws[idx])
-    idx += 1
-  if bn_layer.center:
-    beta = apply_quantizer(bn_layer.beta_quantizer_internal, bn_ws[idx])
-    idx += 1
-  mean = apply_quantizer(bn_layer.mean_quantizer_internal, bn_ws[idx])
-  idx += 1
-  variance = apply_quantizer(bn_layer.variance_quantizer_internal, bn_ws[idx])
-
-  # Compute inv[i]
-  inv = gamma * math_ops.rsqrt(variance + bn_layer.epsilon)
-  inv = inv.numpy()
-  if bn_layer.inverse_quantizer_internal is not None:
-    quantizer = bn_layer.inverse_quantizer_internal
-    inv = tf.keras.backend.eval(quantizer(inv))
-
-  # Compute fused_bias[i]
-  if prev_layer.use_bias:
-    cur_weights = prev_layer.get_weights()
-    assert len(cur_weights) == 2, ("Weights should have length of 2. Found"
-                                   f"{len(cur_weights)} instead.")
-    prev_bias = cur_weights[-1]
-  else:
-    prev_bias = 0
-  b_prime = inv * prev_bias + beta - inv * mean
-
-  saved_weights[prev_layer.name]["enable_bn_fusing"] = True
-  saved_weights[prev_layer.name]["fused_bn_layer_name"] = bn_layer.name
-  saved_weights[prev_layer.name]["bn_inv"] = inv
-  saved_weights[prev_layer.name]["fused_bias"] = b_prime
-
-
+#
 # Model utilities: before saving the weights, we want to apply the quantizers
+#
 def model_save_quantized_weights(model, filename=None):
   """Quantizes model for inference and save it.
 
@@ -231,11 +114,6 @@ def model_save_quantized_weights(model, filename=None):
   weights and biases to exponents + signs (in case of quantize_po2), but
   return instead (-1)**sign*(2**round(log2(x))). In the returned dictionary,
   we will return the pair (sign, round(log2(x))).
-
-  Special care needs to be given to quantized_bits(alpha="auto_po2") as well.
-  Since in this quantizer, hardware needs the integer weights and scale for
-  hardware inference, this function will return the pair (scale,
-  integer_weights) in the returned dictionary.
 
   Arguments:
     model: model with weights to be quantized.
@@ -250,21 +128,14 @@ def model_save_quantized_weights(model, filename=None):
 
   saved_weights = {}
 
-  # Find the conv/dense layers followed by Batchnorm layers
-  (fusing_layer_pair_dict, bn_layers_to_skip) = find_bn_fusing_layer_pair(model)
-
   print("... quantizing model")
   for layer in model.layers:
     if hasattr(layer, "get_quantizers"):
-      # weights for software inference
       weights = []
       signs = []
-      scales = []
-      # weights for hardware inference
-      hw_weights = []
 
       if any(isinstance(layer, t) for t in [
-          QConv2DBatchnorm, QDepthwiseConv2DBatchnorm]):
+          QConv2DBatchnorm, QDenseBatchnorm, QDepthwiseConv2DBatchnorm]):
         qs = layer.get_quantizers()
         ws = layer.get_folded_weights()
       elif any(isinstance(layer, t) for t in [QSimpleRNN, QLSTM, QGRU]):
@@ -275,13 +146,6 @@ def model_save_quantized_weights(model, filename=None):
         ws = layer.get_weights()
 
       has_sign = False
-      has_scale = False
-      enable_bn_fusing = False
-
-      if (isinstance(layer, QBatchNormalization) and
-          layer.name in bn_layers_to_skip):
-        # Mark current bn layer to be fused with the previous layer
-        enable_bn_fusing = True
 
       for quantizer, weight in zip(qs, ws):
         if quantizer:
@@ -291,7 +155,7 @@ def model_save_quantized_weights(model, filename=None):
         # If quantizer is power-of-2 (quantized_po2 or quantized_relu_po2),
         # we would like to process it here.
         #
-        # However, we cannot, because we will lose sign information as
+        # However, we cannot, because we will loose sign information as
         # quanized_po2 will be represented by the tuple (sign, log2(abs(w))).
         #
         # In addition, we will not be able to use the weights on the model
@@ -300,11 +164,9 @@ def model_save_quantized_weights(model, filename=None):
         # So, instead of "saving" the weights in the model, we will return
         # a dictionary so that the proper values can be propagated.
 
-        # Weights store the weight in the format that software inference uses.
         weights.append(weight)
 
         has_sign = False
-        has_scale = False
         if quantizer:
           if isinstance(quantizer, six.string_types):
             q_name = quantizer
@@ -317,84 +179,27 @@ def model_save_quantized_weights(model, filename=None):
           else:
             q_name = ""
         if quantizer and ("_po2" in q_name):
-          # Quantized_relu_po2 does not have a sign.
+          # Quantized_relu_po2 does not have a sign
           if isinstance(quantizer, quantized_po2):
             has_sign = True
           sign = np.sign(weight)
           # Makes sure values are -1 or +1 only
           sign += (1.0 - np.abs(sign))
-          # hw_weight store the weight in the format that hardware inference
-          # uses.
-          hw_weight = np.round(np.log2(np.abs(weight)))
+          weight = np.round(np.log2(np.abs(weight)))
           signs.append(sign)
-          scales.append([])
-        elif (isinstance(quantizer, quantized_bits) and
-              quantizer.alpha == "auto_po2"):
-          unsigned_bits = quantizer.bits - quantizer.keep_negative
-          m = K.cast_to_floatx(pow(2, unsigned_bits))
-          m_i = K.cast_to_floatx(K.pow(2, quantizer.integer))
-          assert hasattr(quantizer.scale, "numpy"), (
-              "The auto_po2 quantizer has to be called first in order to know "
-              "the values of scale.")
-          scale = K.cast_to_floatx(quantizer.scale.numpy())
-          # Make sure scale is power of 2 values
-          log2val = np.log2(scale)
-          diff = np.round(log2val) - log2val
-          assert np.all(diff == 0), "scale must be power of 2 values!"
-          # Convert fixed point weight to integer weight, just
-          hw_weight = weight * m / m_i
-          # Because hw_weight is integer weights, set scale = scale * m_i / m
-          # so that when we can multiply scale with the integer weight
-          # during hardware inference to get the fixed point weights
-          scale = scale * m_i / m
-          has_scale = True
-          scales.append(scale)
         else:
-          hw_weight = weight
           signs.append([])
-          scales.append([])
-        hw_weights.append(hw_weight)
 
-      # Save the weights in the format that hardware inference uses
-      saved_weights[layer.name] = {"weights": hw_weights,
-                                   "enable_bn_fusing": enable_bn_fusing}
-
-      if (isinstance(layer, QAveragePooling2D) or
-          isinstance(layer, QGlobalAveragePooling2D)):
-        if isinstance(layer, QAveragePooling2D):
-          pool_area = layer.pool_size
-          if isinstance(layer.pool_size, int):
-            pool_area = layer.pool_size * layer.pool_size
-          else:
-            pool_area = np.prod(layer.pool_size)
-        else:
-          pool_area = layer.compute_pooling_area(input_shape=layer.input_shape)
-        saved_weights[
-            layer.name]["q_mult_factor"] = layer.average_quantizer_internal(
-                1.0 / pool_area).numpy()
-        saved_weights[layer.name]["mult_factor"] = 1.0 / pool_area
-        saved_weights[layer.name]["pool_area"] = pool_area
-
+      saved_weights[layer.name] = {"weights": weights}
       if has_sign:
         saved_weights[layer.name]["signs"] = signs
-      if has_scale:
-        saved_weights[layer.name]["scales"] = scales
+
       if not any(isinstance(layer, t) for t in [
-          QConv2DBatchnorm, QDepthwiseConv2DBatchnorm]):
-        # Set layer weights in the format that software inference uses
+          QConv2DBatchnorm, QDenseBatchnorm, QDepthwiseConv2DBatchnorm]):
         layer.set_weights(weights)
       else:
         print(layer.name, " conv and batchnorm weights cannot be seperately"
               " quantized because they will be folded before quantization.")
-
-      # adjust weights for bn fusing if necessary
-      if layer.name in fusing_layer_pair_dict.keys():
-        print(f"Fuse {layer.name} output with "
-              f"{fusing_layer_pair_dict[layer.name]} for hardware inference.")
-        add_bn_fusing_weights(
-            prev_layer=layer,
-            bn_layer=model.get_layer(fusing_layer_pair_dict[layer.name]),
-            saved_weights=saved_weights)
     else:
       if layer.get_weights():
         print(" ", layer.name, "has not been quantized")
@@ -473,7 +278,7 @@ def get_y_from_TFOpLambda(model_cfg, layer):
   return None
 
 
-def convert_to_folded_model(model):
+def convert_to_folded_model(model, custom_objects=None):
   """Find conv/dense layers followed by bn layers and fold them.
 
   Args:
@@ -486,7 +291,7 @@ def convert_to_folded_model(model):
   Note: supports sequential and non-sequential model
   """
 
-  fold_model = clone_model(model)
+  fold_model = clone_model(model, custom_objects)
   model_cfg = model.get_config()
   (graph, _) = qgraph.GenerateGraphFromModel(
       fold_model, "quantized_bits(8, 0, 1)", "quantized_bits(8, 0, 1)")
@@ -510,7 +315,7 @@ def convert_to_folded_model(model):
                         "BatchNormalization")
       # TODO(lishanok): extend to QDense types
       is_foldable = layer.__class__.__name__ in [
-          "Conv2D", "DepthwiseConv2D"
+          "Conv2D", "Dense", "DepthwiseConv2D"
       ] and is_single and followed_by_bn
 
       if is_foldable:
@@ -660,7 +465,7 @@ def model_quantize(model,
 
   if enable_bn_folding:
     # Removes bn layers from the model and find a list of layers to fold.
-    model, layers_to_fold = convert_to_folded_model(model)
+    model, layers_to_fold = convert_to_folded_model(model, custom_objects)
     if len(layers_to_fold) == 0:
       # If no layers to fold, no need to perform folding.
       enable_bn_folding = False
@@ -713,10 +518,6 @@ def model_quantize(model,
       if recurrent_activation:
         layer["config"]["recurrent_activation"] = recurrent_activation
     layer["class_name"] = q_name
-
-    registered_name = layer.pop("registered_name", None)
-    if registered_name:
-      layer["registered_name"] = q_name
 
   for layer in layers:
     layer_config = layer["config"]
@@ -908,7 +709,7 @@ def model_quantize(model,
         max_value = layer["config"]["max_value"]
         negative_slope = layer["config"]["alpha"]
         threshold = layer["config"]["threshold"]
-      else:  # ReLU from mobilenet
+      else: # ReLU from mobilenet
         max_value = layer["config"]["max_value"]
         negative_slope = layer["config"]["negative_slope"]
         threshold = layer["config"]["threshold"]
@@ -935,7 +736,7 @@ def model_quantize(model,
           del layer["config"]["max_value"]
           del layer["config"]["alpha"]
           del layer["config"]["threshold"]
-        else:  # ReLU from mobilenet
+        else: # ReLU from mobilenet
           del layer["config"]["max_value"]
           del layer["config"]["negative_slope"]
           del layer["config"]["threshold"]
@@ -1000,10 +801,6 @@ def model_quantize(model,
       else:
         quantize_activation(layer_config, activation_bits)
 
-    registered_name = layer.pop("registered_name", None)
-    if registered_name:
-      layer["registered_name"] = q_name or registered_name
-
   # We need to keep a dictionary of custom objects as our quantized library
   # is not recognized by keras.
 
@@ -1056,6 +853,8 @@ def _add_supported_quantized_objects(custom_objects):
 
   custom_objects["QConv2DBatchnorm"] = QConv2DBatchnorm
   custom_objects["QDepthwiseConv2DBatchnorm"] = QDepthwiseConv2DBatchnorm
+
+  custom_objects["QDenseBatchnorm"] = QDenseBatchnorm
 
   custom_objects["QAveragePooling2D"] = QAveragePooling2D
   custom_objects["QGlobalAveragePooling2D"] = QGlobalAveragePooling2D
@@ -1192,7 +991,7 @@ def get_model_sparsity(model, per_layer=False, allow_list=None):
         "QSeparableConv2D", "SeparableConv2D", "QOctaveConv2D",
         "QSimpleRNN", "RNN", "QLSTM", "QGRU",
         "QConv2DTranspose", "Conv2DTranspose",
-        "QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm",
+        "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm",
     ]
 
   # Quantizes the model weights for a more accurate sparsity calculation.
@@ -1205,7 +1004,7 @@ def get_model_sparsity(model, per_layer=False, allow_list=None):
   for layer in model.layers:
     if hasattr(layer, "quantizers") and layer.__class__.__name__ in allow_list:
       if layer.__class__.__name__ in [
-          "QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm"]:
+          "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm"]:
         weights_to_examine = layer.get_folded_weights()
       else:
         weights_to_examine = layer.get_weights()
@@ -1232,7 +1031,7 @@ def get_model_sparsity(model, per_layer=False, allow_list=None):
     return total_sparsity
 
 
-def quantized_model_debug(model, X_test, plot=False, plt_instance=None):
+def quantized_model_debug(model, X_test, plot=False, plt_instance=None, batch_size=1024):
   """Debugs and plots model weights and activations.
 
   Args:
@@ -1248,14 +1047,21 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None):
   outputs = []
   output_names = []
 
+  # for layer in model.layers:
+  #   if layer.__class__.__name__ in REGISTERED_LAYERS:
+  #     output_names.append(layer.name)
+  #     outputs.append(layer.output)
+
   for layer in model.layers:
-    if layer.__class__.__name__ in REGISTERED_LAYERS:
-      output_names.append(layer.name)
-      outputs.append(layer.output)
+    output_names.append(layer.name)
+    outputs.append(layer.output)
 
-  model_debug = Model(inputs=model.inputs, outputs=outputs)
 
-  y_pred = model_debug.predict(X_test)
+
+  # model_debug = Model(inputs=model.inputs, outputs=outputs)
+
+  # y_pred = model_debug.predict(X_test)
+  y_pred = model.predict(X_test, batch_size=batch_size)
 
   print("{:30} {: 8.4f} {: 8.4f}".format(
       "input", np.min(X_test), np.max(X_test)))
@@ -1284,7 +1090,7 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None):
     alpha = None
 
     if layer.__class__.__name__ not in [
-        "QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm"]:
+        "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm"]:
       weights_to_examine = layer.get_weights()
     else:
       weights_to_examine = layer.get_folded_weights()
@@ -1296,7 +1102,7 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None):
             "QConv1D", "QConv2D", "QConv2DTranspose", "QDense",
             "QSimpleRNN", "QLSTM", "QGRU",
             "QSeparableConv1D", "QSeparableConv2D",
-            "QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm"
+            "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm"
         ]:
           alpha = get_weight_scale(layer.get_quantizers()[i], weights)
           # if alpha is 0, let's remove all weights.
@@ -1306,7 +1112,7 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None):
             plt_instance.hist(weights.flatten(), bins=25)
             plt_instance.title(layer.name + "(weights)")
             plt_instance.show()
-      print(" ({: 8.4f} {: 8.4f})".format(np.min(weights), np.max(weights)),
+      print(" weights: ({: 8.4f} {: 8.4f})".format(np.min(weights), np.max(weights)),
             end="")
     if alpha is not None and isinstance(alpha, np.ndarray):
       print(" a({: 10.6f} {: 10.6f})".format(

@@ -1,3 +1,4 @@
+# Lint as: python3
 # Copyright 2019 Google LLC
 #
 #
@@ -19,8 +20,6 @@ from __future__ import division
 from __future__ import print_function
 
 from absl import logging
-import copy
-
 from qkeras.qtools.quantized_operators import multiplier_impl
 from qkeras.qtools.quantized_operators import quantizer_impl
 
@@ -150,12 +149,6 @@ class MultiplierFactory:
     (multiplier_impl_class, output_quantizer) = self.multiplier_impl_table[
         weight_quantizer.mode][input_quantizer.mode]
 
-    # Need to create local copies becuase different multiplier instances
-    # created from the factory might make changes to these quantizers.
-
-    local_weight_quantizer = copy.deepcopy(weight_quantizer)
-    local_input_quantizer = copy.deepcopy(input_quantizer)
-    local_output_quantizer = copy.deepcopy(output_quantizer)
     logging.debug(
         "multiplier implemented as class %s",
         multiplier_impl_class.implemented_as())
@@ -163,7 +156,7 @@ class MultiplierFactory:
     assert issubclass(multiplier_impl_class, multiplier_impl.IMultiplier)
 
     return multiplier_impl_class(
-        local_weight_quantizer,
-        local_input_quantizer,
-        local_output_quantizer
+        weight_quantizer,
+        input_quantizer,
+        output_quantizer
     )

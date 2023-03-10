@@ -27,6 +27,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras import Input
 
 from .qconvolutional import QConv2D
+from .qlayers import QDense
 from .qconvolutional import QDepthwiseConv2D
 from .qtools import generate_layer_data_type_map as gen_map
 from .qtools import qgraph
@@ -48,6 +49,8 @@ def convert_folded_layer_to_unfolded(layer):
   # QConv2D object and generate template for its config
   if layer.__class__.__name__ == "QConv2DBatchnorm":
     new_layer = QConv2D(filters=1, kernel_size=(2, 2), use_bias=True)
+  elif layer.__class__.__name__ == "QDenseBatchnorm":
+    new_layer = QDense(units=1, use_bias=True)
   elif layer.__class__.__name__ == "QDepthwiseConv2DBatchnorm":
     new_layer = QDepthwiseConv2D(kernel_size=(2, 2), use_bias=True)
   else:
@@ -71,6 +74,8 @@ def convert_folded_layer_to_unfolded(layer):
     new_layer = QConv2D.from_config(new_layer_cfg)
   elif layer.__class__.__name__ == "QDepthwiseConv2DBatchnorm":
     new_layer = QDepthwiseConv2D.from_config(new_layer_cfg)
+  elif layer.__class__.__name__ == "QDenseBatchnorm":
+    new_layer = QDense.from_config(new_layer_cfg)
   else:
     raise ValueError("Unsupported layer conversion {}".format(layer.name))
 
@@ -99,7 +104,7 @@ def unfold_model(model):
 
   def _convert_folded_layer(layer):
     if layer.__class__.__name__ in [
-        "QConv2DBatchnorm", "QDepthwiseConv2DBatchnorm"]:
+        "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm"]:
       new_layer = convert_folded_layer_to_unfolded(layer)
     else:
       new_layer = layer.__class__.from_config(layer.get_config())
@@ -126,6 +131,13 @@ def unfold_model(model):
       folded_bias_quantized = src_weights[1].numpy()
       new_layer.set_weights(
           [folded_depthwise_kernel_quantized, folded_bias_quantized])
+    elif (src_layer.__class__.__name__ == "QDenseBatchnorm") and (
+        new_layer.__class__.__name__ == "QDense"):
+      # transfer weights from folded layer to the target layer
+      src_weights = src_layer.get_folded_weights()
+      folded_depthwise_kernel_quantized = src_weights[0].numpy()
+      folded_bias_quantized = src_weights[1].numpy()
+      new_layer.set_weights([folded_depthwise_kernel_quantized, folded_bias_quantized])
     else:
       new_layer.set_weights(src_layer.get_weights())
 

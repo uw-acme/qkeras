@@ -29,7 +29,6 @@ from tensorflow.python.framework import smart_cond as tf_utils
 from .safe_eval import safe_eval
 
 
-
 #
 # Library of auxiliary functions
 #
@@ -265,7 +264,7 @@ def stochastic_round(x, precision=0.5):
 
 def stochastic_round_po2(x):
   """Performs stochastic rounding for the power of two."""
-  # TODO(b/237832905): test stochastic_round_po2 and constraint.
+  # TODO(hzhuang): test stochastic_round_po2 and constraint.
   # because quantizer is applied after constraint.
   y = tf.abs(x)
   eps = tf.keras.backend.epsilon()
@@ -904,7 +903,7 @@ class ternary(BaseQuantizer):  # pylint: disable=invalid-name
     if isinstance(self.alpha, six.string_types):
       # It is for parameters
       # first, compute which asix corresponds to the channels.
-      # TODO(b/237833510): support channels_first
+      # TODO(hzhuang): support channels_first
       try:
         len_axis = len(x.shape.as_list())
       except AttributeError:
@@ -1468,22 +1467,31 @@ class quantized_relu(BaseQuantizer):  # pylint: disable=invalid-name
       flags.append(str(int(self.use_stochastic_rounding)))
     return "quantized_relu(" + ",".join(flags) + ")"
 
-  def __call__(self, x):
+  def __call__(self, x):       # Change needed
     if not self.built:
       self.build(var_name=self.var_name, use_variables=self.use_variables)
 
     non_sign_bits = self.bits - (self.negative_slope != 0.0)
-    x = K.cast(x, dtype="float32")
-    m = K.cast(K.pow(2, non_sign_bits), dtype="float32")
-    m_i = K.cast(K.pow(2, self.integer), dtype="float32")
+    # x = K.cast(x, dtype="float32")
+    # m = K.cast(K.pow(2, non_sign_bits), dtype="float32")
+    # m_i = K.cast(K.pow(2, self.integer), dtype="float32")
+
+    x = K.cast_to_floatx(x)
+    m = K.cast_to_floatx(pow(2, non_sign_bits))
+    m_i = K.cast_to_floatx(pow(2, self.integer))
+
 
     # is_quantized_clip has precedence over relu_upper_bound for backward
     # compatibility.
-    m_f = K.cast(
-        K.pow(
-            tf.constant(2., tf.float32),
-            K.cast(self.integer, dtype="float32") - non_sign_bits),
-        dtype="float32")
+    # m_f = K.cast(
+    #     K.pow(
+    #         tf.constant(2., tf.float32),
+    #         K.cast(self.integer, dtype="float32") - non_sign_bits),
+    #     dtype="float32")
+
+    m_f = K.cast_to_floatx(pow(tf.constant(2., tf.float32),
+                           K.cast_to_floatx(self.integer) - non_sign_bits))
+
     if self.is_quantized_clip:
       x_u = tf.where(x <= m_i - m_f, K.relu(x, alpha=self.negative_slope),
                      tf.ones_like(x) * (m_i - m_f))

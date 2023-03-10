@@ -1,3 +1,4 @@
+# Lint as: python3
 # ==============================================================================
 # Copyright 2020 Google LLC
 #
@@ -33,6 +34,7 @@ import tensorflow as tf
 import tensorflow.keras.backend as K
 from tensorflow.keras.metrics import binary_accuracy
 from tensorflow.keras.metrics import categorical_accuracy
+from tensorflow.keras.metrics import mean_absolute_error
 from tensorflow.keras.metrics import sparse_categorical_accuracy
 from qkeras.autoqkeras.forgiving_metrics import forgiving_factor  # pylint: disable=line-too-long
 from qkeras.autoqkeras.forgiving_metrics import ForgivingFactor  # pylint: disable=line-too-long
@@ -147,6 +149,7 @@ class AutoQKHyperModel(HyperModel):
       self.limit = limit
 
     self.groups = {}
+
 
     assert isinstance(self.limit, dict)
 
@@ -702,23 +705,23 @@ class AutoQKHyperModel(HyperModel):
       is_sparse_categorical = (
           y_t_rank < y_p_rank or y_t_last_dim == 1 and y_p_last_dim > 1)
 
-      if isinstance(metric_function, six.string_types):
-        if metric_function in ["accuracy", "acc"]:
-          if is_binary:
-            metric = binary_accuracy(y_true, y_pred)
-          elif is_sparse_categorical:
-            metric = sparse_categorical_accuracy(y_true, y_pred)
-          else:
-            metric = categorical_accuracy(y_true, y_pred)
-        else:
-          metric = categorical_accuracy(y_true, y_pred)
-      else:
-        metric = metric_function(y_true, y_pred)
+      # if isinstance(metric_function, six.string_types):
+      #   if metric_function in ["accuracy", "acc"]:
+      #     if is_binary:
+      #       metric = binary_accuracy(y_true, y_pred)
+      #     elif is_sparse_categorical:
+      #       metric = sparse_categorical_accuracy(y_true, y_pred)
+      #     else:
+      #       metric = categorical_accuracy(y_true, y_pred)
+      #   else:
+      #     metric = categorical_accuracy(y_true, y_pred)
+      # else:
+      metric = mean_absolute_error(y_true, y_pred)
 
-      return K.cast(metric * (1.0 + delta), K.floatx())
+      return K.cast((1/(metric * 10)) * (1.0 + delta), K.floatx())
 
     if not metric_function:
-      metric_function = "accuracy"
+      metric_function = "mean_absolute_error"
 
     return score
 

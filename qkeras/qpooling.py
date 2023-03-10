@@ -60,42 +60,28 @@ class QAveragePooling2D(AveragePooling2D):
     2. first, we call keras version of averaging first: y1 = keras_average(x)
        then multiply it with pool_size^2: y2 = y1 * pool_area
        Last, y3 = y2 * quantize(1/ pool_area)
-    3. Improved based on #2, but multiply x with pool_area before averaging
-       so that we don't lose precision during averaging. The order now becomes:
-       first, multiply x with pool_area: y1 = x * pool_area
-       then we call keras version of averaging: y2 = keras_average(y1)
-       Last, y3 = y2 * quantize(1/ pool_area)
-    4. Since there is sum_pooling operation, another solution is to use
-       depthwise_conv2d with kernel weights = 1 to get the pooling sum. In this
-       case we don't lose precision due to averaging. However, this solution
-       will introduce extra weights to the layer, which might break our code
-       elsewhere.
+    Our numerical anaysis suggests negligible error between 1 and 2. Therefore
+    we use option #2 here for the simplicity of implementation.
 
-    Since we need to match software and hardware inference numerics, we are now
-    using #3 in the implementation.
     """
 
+    x = super(QAveragePooling2D, self).call(inputs)
+
     if self.average_quantizer:
-      # Calculates the pool area
       if isinstance(self.pool_size, int):
         pool_area = self.pool_size * self.pool_size
       else:
         pool_area = np.prod(self.pool_size)
 
-      # Calculates the pooling average of x*pool_area
-      x = super(QAveragePooling2D, self).call(inputs*pool_area)
+      # Revertes the division results.
+      x = x * pool_area
 
       # Quantizes the multiplication factor.
       mult_factor = 1.0 / pool_area
+
       q_mult_factor = self.average_quantizer_internal(mult_factor)
       q_mult_factor = K.cast_to_floatx(q_mult_factor)
-
-      # Computes pooling average.
       x = x * q_mult_factor
-
-    else:
-      # Since no quantizer is available, we directly call the keras layer
-      x = super(QAveragePooling2D, self).call(inputs)
 
     if self.activation is not None:
       return self.activation(x)
@@ -103,12 +89,9 @@ class QAveragePooling2D(AveragePooling2D):
 
   def get_config(self):
     config = {
-        "average_quantizer": constraints.serialize(
-            self.average_quantizer_internal, use_legacy_format=True
-        ),
-        "activation": constraints.serialize(
-            self.activation, use_legacy_format=True
-        ),
+        "average_quantizer":
+            constraints.serialize(self.average_quantizer_internal),
+        "activation": constraints.serialize(self.activation),
     }
     base_config = super(QAveragePooling2D, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))
@@ -146,8 +129,7 @@ class QGlobalAveragePooling2D(GlobalAveragePooling2D):
         data_format=data_format, **kwargs)
 
   def compute_pooling_area(self, input_shape):
-    if not isinstance(input_shape, tuple):
-      input_shape = input_shape.as_list()
+    input_shape = input_shape.as_list()
     if self.data_format == "channels_last":
       return input_shape[1] * input_shape[2]
     else:
@@ -166,34 +148,21 @@ class QGlobalAveragePooling2D(GlobalAveragePooling2D):
        then multiply it with the denominator(pool_area) used by averaging:
        y2 = y1 * pool_area
        Last, y3 = y2 * quantize(1/ pool_area)
-    3. we perform pooling sum, and then multiply the sum with the quantized
-       inverse multiplication factor to get the average value.
+    Our numerical anaysis suggests negligible error between 1 and 2. Therefore
+    we use option #2 here for the simplicity of implementation.
 
-    Our previous implementation uses option #2. Yet we observed minor numerical
-    mismatch between software and hardware inference. Therefore we use #3 as
-    the current implementation.
     """
 
+    x = super(QGlobalAveragePooling2D, self).call(inputs)
+
     if self.average_quantizer:
-      # Calculates pooling sum.
-      if self.data_format == "channels_last":
-        x = K.sum(inputs, axis=[1, 2], keepdims=self.keepdims)
-      else:
-        x = K.sum(inputs, axis=[2, 3], keepdims=self.keepdims)
-
-      # Calculates the pooling area
       pool_area = self.compute_pooling_area(input_shape=inputs.shape)
-
-      # Quantizes the inverse multiplication factor
+      # Reverts the division results
+      x = x * pool_area
+      # Quantizes the multiplication factor
       mult_factor = 1.0 / pool_area
       q_mult_factor = self.average_quantizer_internal(mult_factor)
-
-      # Derives average pooling value from pooling sum.
       x = x * q_mult_factor
-
-    else:
-      # If quantizer is not available, calls the keras layer.
-      x = super(QGlobalAveragePooling2D, self).call(inputs)
 
     if self.activation is not None:
       return self.activation(x)
@@ -201,12 +170,9 @@ class QGlobalAveragePooling2D(GlobalAveragePooling2D):
 
   def get_config(self):
     config = {
-        "average_quantizer": constraints.serialize(
-            self.average_quantizer_internal, use_legacy_format=True
-        ),
-        "activation": constraints.serialize(
-            self.activation, use_legacy_format=True
-        ),
+        "average_quantizer":
+            constraints.serialize(self.average_quantizer_internal),
+        "activation": constraints.serialize(self.activation),
     }
     base_config = super(QGlobalAveragePooling2D, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))

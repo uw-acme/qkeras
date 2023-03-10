@@ -28,6 +28,7 @@ from tensorflow.keras import constraints
 from tensorflow.keras import initializers
 from tensorflow.keras import regularizers
 from tensorflow.keras.layers import BatchNormalization
+from tensorflow.keras.layers import LayerNormalization
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import smart_cond as tf_utils
 from tensorflow.python.ops import array_ops
@@ -69,7 +70,6 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
       gamma_quantizer='quantized_relu_po2(6, 2048)',
       mean_quantizer='quantized_po2(5)',
       variance_quantizer='quantized_relu_po2(6, quadratic_approximation=True)',
-      inverse_quantizer=None,
       gamma_constraint=None,
       beta_constraint=None,
       # use quantized_po2 and enforce quadratic approximation
@@ -88,22 +88,16 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
     self.beta_range = beta_range
     self.activation = activation
 
+
     self.beta_quantizer = beta_quantizer
     self.gamma_quantizer = gamma_quantizer
     self.mean_quantizer = mean_quantizer
     self.variance_quantizer = variance_quantizer
-    self.inverse_quantizer = inverse_quantizer
-
-    if self.inverse_quantizer is not None:
-      assert self.variance_quantizer is None and self.gamma_quantizer is None, (
-          'If using the inverse quantizer, the gamma and variance quantizers '
-          'should not be used in order to avoid quantizing a value twice.')
 
     self.beta_quantizer_internal = get_quantizer(self.beta_quantizer)
     self.gamma_quantizer_internal = get_quantizer(self.gamma_quantizer)
     self.mean_quantizer_internal = get_quantizer(self.mean_quantizer)
     self.variance_quantizer_internal = get_quantizer(self.variance_quantizer)
-    self.inverse_quantizer_internal = get_quantizer(self.inverse_quantizer)
 
     if hasattr(self.gamma_quantizer_internal, '_set_trainable_parameter'):
       self.gamma_quantizer_internal._set_trainable_parameter()
@@ -114,8 +108,7 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
         self.gamma_quantizer_internal,
         self.beta_quantizer_internal,
         self.mean_quantizer_internal,
-        self.variance_quantizer_internal,
-        self.inverse_quantizer_internal
+        self.variance_quantizer_internal
     ]
 
     if scale and self.gamma_quantizer:
@@ -275,26 +268,20 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
       self.add_update(mean_update)
       self.add_update(variance_update)
 
-    quantized_mean = _broadcast(math_ops.cast(quantized_mean, inputs.dtype))
-    quantized_variance = _broadcast(
-        math_ops.cast(quantized_variance, inputs.dtype))
+    quantized_mean = math_ops.cast(quantized_mean, inputs.dtype)
+    quantized_variance = math_ops.cast(quantized_variance, inputs.dtype)
     if offset is not None:
       offset = math_ops.cast(offset, inputs.dtype)
     if scale is not None:
       scale = math_ops.cast(scale, inputs.dtype)
-
-    # Calculate and quantize the inverse
-    inv = math_ops.rsqrt(quantized_variance + self.epsilon)
-    if scale is not None:
-      inv *= scale
-    if self.inverse_quantizer_internal is not None:
-      inv = self.inverse_quantizer_internal(inv)
-
-    # Calculate the forward pass of the BN
-    outputs = inputs * math_ops.cast(inv, inputs.dtype) + math_ops.cast(
-        offset - quantized_mean * inv
-        if offset is not None else -quantized_mean * inv, inputs.dtype)
-
+    # TODO(reedwm): Maybe do math in float32 if given float16 inputs, if doing
+    # math in float16 hurts validation accuracy of popular models like resnet.
+    outputs = nn.batch_normalization(inputs,
+                                     _broadcast(quantized_mean),
+                                     _broadcast(quantized_variance),
+                                     offset,
+                                     scale,
+                                     self.epsilon)
     # If some components of the shape got lost due to adjustments, fix that.
     outputs.set_shape(input_shape)
 
@@ -307,45 +294,24 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
         'epsilon': self.epsilon,
         'center': self.center,
         'scale': self.scale,
-        'beta_quantizer': constraints.serialize(
-            self.beta_quantizer_internal, use_legacy_format=True
-        ),
-        'gamma_quantizer': constraints.serialize(
-            self.gamma_quantizer_internal, use_legacy_format=True
-        ),
-        'mean_quantizer': constraints.serialize(
-            self.mean_quantizer_internal, use_legacy_format=True
-        ),
-        'variance_quantizer': constraints.serialize(
-            self.variance_quantizer_internal, use_legacy_format=True
-        ),
-        'beta_initializer': initializers.serialize(
-            self.beta_initializer, use_legacy_format=True
-        ),
-        'gamma_initializer': initializers.serialize(
-            self.gamma_initializer, use_legacy_format=True
-        ),
-        'moving_mean_initializer': initializers.serialize(
-            self.moving_mean_initializer, use_legacy_format=True
-        ),
-        'moving_variance_initializer': initializers.serialize(
-            self.moving_variance_initializer, use_legacy_format=True
-        ),
-        'inverse_quantizer': initializers.serialize(
-            self.inverse_quantizer_internal, use_legacy_format=True
-        ),
-        'beta_regularizer': regularizers.serialize(
-            self.beta_regularizer, use_legacy_format=True
-        ),
-        'gamma_regularizer': regularizers.serialize(
-            self.gamma_regularizer, use_legacy_format=True
-        ),
-        'beta_constraint': constraints.serialize(
-            self.beta_constraint, use_legacy_format=True
-        ),
-        'gamma_constraint': constraints.serialize(
-            self.gamma_constraint, use_legacy_format=True
-        ),
+        'beta_quantizer':
+            constraints.serialize(self.beta_quantizer_internal),
+        'gamma_quantizer':
+            constraints.serialize(self.gamma_quantizer_internal),
+        'mean_quantizer':
+            constraints.serialize(self.mean_quantizer_internal),
+        'variance_quantizer':
+            constraints.serialize(self.variance_quantizer_internal),
+        'beta_initializer': initializers.serialize(self.beta_initializer),
+        'gamma_initializer': initializers.serialize(self.gamma_initializer),
+        'moving_mean_initializer':
+            initializers.serialize(self.moving_mean_initializer),
+        'moving_variance_initializer':
+            initializers.serialize(self.moving_variance_initializer),
+        'beta_regularizer': regularizers.serialize(self.beta_regularizer),
+        'gamma_regularizer': regularizers.serialize(self.gamma_regularizer),
+        'beta_constraint': constraints.serialize(self.beta_constraint),
+        'gamma_constraint': constraints.serialize(self.gamma_constraint),
         'beta_range': self.beta_range,
         'gamma_range': self.gamma_range,
     }
@@ -360,6 +326,7 @@ class QBatchNormalization(BatchNormalization, PrunableLayer):
 
   def get_prunable_weights(self):
     return []
+
 
 
 class QLayerNormalization(LayerNormalization, PrunableLayer):

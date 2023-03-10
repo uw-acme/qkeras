@@ -1,3 +1,4 @@
+# Lint as: python3
 # Copyright 2019 Google LLC
 #
 #
@@ -22,18 +23,6 @@ from __future__ import print_function
 import copy
 import numpy as np
 import tensorflow.keras.backend as K
-import sys
-
-from qkeras.qtools import quantized_operators
-
-
-def get_val(feature, key):
-  # Return feature[key] or feature.key
-  if isinstance(feature, dict):
-    val = feature.get(key, None)
-  else:
-    val = getattr(feature, key, None)
-  return val
 
 
 def is_shape_alternation_layers(layer):
@@ -189,20 +178,9 @@ def get_operation_count(layer, input_shape):
 
   elif layer.__class__.__name__ in ["QDense", "Dense"]:
     output_shape = layer.compute_output_shape(input_shape)
-    # Find the input and output shapes out of all possible dimensions.
-    # Usually, the first shape dimension will be the batch size, and the second
-    # shape dimension will be the number of channels. However, if the
-    # Dense layer is in Squeeze-and-Excite, the first shape dimension
-    # will be the batch size, the second and third shape dimension will be the
-    # spatial sizes (should both be 1), and the fourth shape dimensions will
-    # be the number of channels
-    ishape = np.array([i for i in input_shape if i is not None])
-    assert sum(ishape > 1) == 1, "Tensor shape has multiple >1 size dims"
-    size_i = np.max(ishape)
-
-    oshape = np.array([i for i in output_shape if i is not None])
-    assert sum(oshape > 1) == 1, "Tensor shape has multiple >1 size dims"
-    size_o = np.max(oshape)
+    print(input_shape)
+    _, size_i = input_shape
+    _, size_o = output_shape
 
     operation_count = (size_i * size_o)
 
@@ -213,118 +191,12 @@ def get_operation_count(layer, input_shape):
   return int(operation_count)
 
 
-def get_weights(layer, model_weights_already_quantized=True):
-  """Get layer weights.
-
-  Args:
-    layer: given qkeras/keras layer
-    model_weights_already_quantized: bool. whether the given layer's weights
-      are already quantized. This is necessary because with certain quantizers,
-      eg., quantized_bits(alpha="auto_po2"), we cannot quantize the same
-      weights more than once, as it will lead to different results.
-
-  Return:
-    Quantized layer weights.
-  """
-
+def get_weights(layer):
   weights = layer.get_weights()
   out = copy.deepcopy(weights)
-  if not model_weights_already_quantized:
-    for j, weight in enumerate(weights):
-      if hasattr(layer, "get_quantizers") and layer.get_quantizers()[j]:
-        out[j] = K.eval(
-            layer.get_quantizers()[j](K.constant(weight)))
+  for j, weight in enumerate(weights):
+    if hasattr(layer, "get_quantizers") and layer.get_quantizers()[j]:
+      out[j] = K.eval(
+          layer.get_quantizers()[j](K.constant(weight)))
+
   return out
-
-
-def adjust_multiplier_for_auto_po2(multiplier, qkeras_weight_quantizer):
-  """Adjust multiplier when weight quantizer is auto_po2 type.
-
-  Multiplier_bits = bits_x + bits_w
-  Multiplier_intbits = log2(scale) + intbits_x + intbits_w
-
-  Because we might have different scale for auto_po2 quantizer at different
-  output channels, multiplier will have different integer bits at different
-  output channel accordingly, which is not desirable in hardware implementation.
-  Therefore we set a general multiplier quantizers so that it provides enough
-  fractional bits and integer bits for all output channels.
-  """
-  print("adjust multiplier for auto_po2 ...")
-  output_quantizer = multiplier.output
-  if (hasattr(qkeras_weight_quantizer, "__str__") and
-      "quantized_bits" in qkeras_weight_quantizer.__str__() and
-      qkeras_weight_quantizer.alpha == "auto_po2"):
-    bits = output_quantizer.bits
-    int_bits = output_quantizer.int_bits
-    scale = qkeras_weight_quantizer.scale
-    if hasattr(scale, "numpy"):
-      # if scale doesn't have numpy() function, it means the quantizer has
-      # never being called. Therfore we skip the following steps
-      scale = scale.numpy()
-      if isinstance(scale, np.ndarray):
-        scale = np.squeeze(scale)
-        max_shift = int(np.log2(np.max(scale)))
-        min_shift = int(np.log2(np.min(scale)))
-      elif isinstance(scale, float):
-        max_shift = int(np.log2(scale))
-        min_shift = max_shift
-      else:
-        raise ValueError(f"Scale should be either numpy array or float,"
-                         f"{type(scale)} is found instead!")
-
-      # In order to set a general quantizer for different output channels,
-      # we need to set both fractional bits and integer bits as the max required
-      # bits for different output channels
-      max_fractional_bits = bits - int_bits - min_shift
-      max_int_bits = int_bits + max_shift
-      total_bits = max_int_bits + max_fractional_bits
-
-      output_quantizer.bits = total_bits
-      output_quantizer.int_bits = max_int_bits
-    else:
-      print("[WARNING] The weight quantizer is never called even though it has "
-            "alpha=auto_po2. In this case we do not adjust the multiplier and "
-            "accumulator bit width since we don't know the exact values of "
-            "scale", file=sys.stderr)
-  elif hasattr(qkeras_weight_quantizer, "alpha") and (
-      qkeras_weight_quantizer.alpha == "auto_po2"):
-    print("[WARNING] auto_po2 is detected on a non-quantized_bits quantizer."
-          "Currently in QTools we do not yet support the auto_po2 with the "
-          f" given quantizer type: {type(qkeras_weight_quantizer)}."
-          "Therefore we do not adjust the multiplier and accumulator bit width")
-
-
-def adjust_accumulator_for_auto_po2(
-    layer, multiplier, qkeras_weight_quantizer, bias_quantizer):
-  """Adjust accumulator when weight quantizer is auto_po2 type."""
-
-  fused_multiplier = copy.deepcopy(multiplier)
-  adjust_multiplier_for_auto_po2(fused_multiplier, qkeras_weight_quantizer)
-  weights = layer.get_weights()
-  kernel = weights[0]
-
-  kernel_shape = kernel.shape
-  # depthwise_kernel_shape = kernel_size + (input_dim, depth_multiplier)
-  # When computing accumulator bitwidth for dw conv2d layer, we do not
-  # need to count the last two dimensions
-  if layer.__class__.__name__ in ["QDepthwiseConv2D", "DepthwiseConv2D"]:
-    assert kernel_shape[-1] == 1, ("depth_multiplier must be 1, "
-                                   f"{kernel_shape[-1]} found instead!")
-    kernel_shape = kernel.shape[:-2] + (1, 1)
-
-  kernel_accumulator_factory = quantized_operators.AccumulatorFactory()
-  # Sets use_bias=False so that the accumulator doesn't account for bias
-  # bitwdith.
-  fused_kernel_accumulator = kernel_accumulator_factory.make_accumulator(
-      kernel_shape, fused_multiplier, use_bias=False)
-
-  if not layer.use_bias:
-    bias_quantizer = None
-    fused_accumulator = fused_kernel_accumulator
-  else:
-    # Add bias quantizer bitwidth to the overall accumulator
-    bias_accumulator_instance = quantized_operators.adder_factory.IAdder()
-    fused_accumulator = bias_accumulator_instance.make_quantizer(
-        fused_kernel_accumulator.output, bias_quantizer)
-
-  return fused_accumulator

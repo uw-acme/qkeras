@@ -1,3 +1,4 @@
+# Lint as: python3
 # Copyright 2019 Google LLC
 #
 #
@@ -19,8 +20,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import copy
-
 from qkeras.qtools.quantized_operators import accumulator_impl
 from qkeras.qtools.quantized_operators import multiplier_impl
 
@@ -35,27 +34,22 @@ class AccumulatorFactory:
   ) -> accumulator_impl.IAccumulator:
     """Create an accumulator instance."""
 
-    # Creates a local deep copy so that any changes we made to the multiplier
-    # will not impact the input multiplier type. This is necessary in case
-    # we call this function multiple times to get different multipliers.
-    local_multiplier = copy.deepcopy(multiplier)
-
     # The type and bit width of the accumulator is deteremined from the
     # multiplier implementation, and the shape of both kernel and bias
 
-    if local_multiplier.output.is_floating_point:
+    if multiplier.output.is_floating_point:
       accumulator = accumulator_impl.FloatingPointAccumulator(
-          local_multiplier)
+          multiplier)
 
     # po2*po2 is implemented as Adder; output type is po2
     # in multiplier, po2 needs to be converted to FixedPoint
-    elif local_multiplier.output.is_po2:
+    elif multiplier.output.is_po2:
       accumulator = accumulator_impl.Po2Accumulator(
-          kernel_shape, local_multiplier, use_bias)
+          kernel_shape, multiplier, use_bias)
 
     # fixed point
     else:
       accumulator = accumulator_impl.FixedPointAccumulator(
-          kernel_shape, local_multiplier, use_bias)
+          kernel_shape, multiplier, use_bias)
 
     return accumulator

@@ -1,3 +1,4 @@
+# Lint as: python3
 # Copyright 2019 Google LLC
 #
 #
@@ -55,8 +56,6 @@ class QuantizerFactory:
             quantizer_impl.QuantizedUlaw,
         
             
-        
-            
 
         # add following quantizer types for the use in GraphUpdateEdge
         quantizer_impl.QuantizedBits:
@@ -83,8 +82,6 @@ class QuantizerFactory:
             quantizer_impl.StochasticTernary,
         quantizer_impl.QuantizedUlaw:
             quantizer_impl.StochasticTernary,
-        
-            
         
             
     }

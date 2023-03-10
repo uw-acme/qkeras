@@ -26,7 +26,6 @@ from .accumulator_impl import IAccumulator, FloatingPointAccumulator, FixedPoint
 from .quantizer_impl import IQuantizer, QuantizedBits, Binary, QuantizedRelu, Ternary, FloatingPoint, PowerOfTwo, ReluPowerOfTwo
 from .quantizer_factory import QuantizerFactory
 from .qbn_factory import QBNFactory
-from .fused_bn_factory import FusedBNFactory
 from .merge_factory import MergeFactory
 from .divider_factory import IDivider
 from .subtractor_factory import ISubtractor

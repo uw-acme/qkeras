@@ -130,104 +130,91 @@ def map_to_json(mydict):
   if bool(q_list):
     output_dict["source_quantizers"] = q_list
 
-  def set_layer_item(layer_item, key, feature, shape=None,
-                     is_compound_datatype=False, output_key_name=None):
-    """Generates the quantizer entry to a given layer_item.
-
-    This function extracts relevanant quantizer fields using the key (
-    quantizer name) from a given feature (layer entry from layer_data_type_map).
-
-    Args:
-      layer_item: Layer entry in the output dictionary. It includes the
-        info such as quantizers, output shape, etc. of each layer
-      key: Quantizer, such as kernel/bias quantizer, etc. If feature
-      feature: layer_data_type_map entry of each layer. This feature will be
-        parsed and converted to layer_item for the output dictionary.
-      shape: quantizer input shape
-      is_compound_datatype: Bool. Wether the quantizer is a compound
-        or unitary quantizer type. For example, kernel quantizer and bias
-        quantizer are unitary quantizer types, multiplier and accumulator
-        are compound quantizer types.
-      output_key_name: str. Change key to output_key_name in layer_item. If
-        None, will use the existing key.
-
-    Return:
-      None
-    """
-    val = qtools_util.get_val(feature, key)
-    if val is not None:
-      quantizer = val
-      implemented_as = None
-      if is_compound_datatype:
-        quantizer = val.output
-        implemented_as = val.implemented_as()
-      if output_key_name is None:
-        key_name = key
-      else:
-        key_name = output_key_name
-      tmp = populate_quantizer(
-          quantizer, shape=shape, implemented_as=implemented_as)
-      if bool(tmp):
-        layer_item[key_name] = tmp
-
   for layer, feature in layer_data_type_map.items():
     layer_item = collections.OrderedDict()
     layer_item["layer_type"] = layer.__class__.__name__
-    layer_item["input_quantizer_list"] = [
-        populate_quantizer(q) for q in qtools_util.get_val(
-            feature, "input_quantizer_list")]
-
-    set_layer_item(layer_item, key="output_quantizer", feature=feature,
-                   shape=qtools_util.get_val(feature, "output_shapes"))
 
     if layer_item["layer_type"] in [
         "QBatchNormalization", "BatchNormalization"]:
+      layer_item["input_quantizer_list"] = [
+          populate_quantizer(q) for q in feature["input_quantizer_list"]]
 
-      for key in ["gamma_quantizer", "beta_quantizer", "mean_quantizer",
-                  "variance_quantizer", "variance_quantizer"]:
-        set_layer_item(layer_item, key=key, feature=feature)
+      if feature["gamma_quantizer"]:
+        layer_item["gamma_quantizer"] = populate_quantizer(
+            feature["gamma_quantizer"])
 
-      for key in ["internal_divide_quantizer",
-                  "internal_multiplier", "internal_accumulator"]:
-        set_layer_item(layer_item, key=key, feature=feature,
-                       is_compound_datatype=True)
+      if feature["beta_quantizer"]:
+        layer_item["beta_quantizer"] = populate_quantizer(
+            feature["beta_quantizer"])
 
-    elif layer_item["layer_type"] in [
-        "AveragePooling2D", "AvgPool2D", "GlobalAvgPool2D",
-        "GlobalAveragePooling2D", "QAveragePooling2D",
-        "QGlobalAveragePooling2D"]:
-      set_layer_item(layer_item, key="average_quantizer", feature=feature)
-      for key in ["pool_sum_accumulator", "pool_avg_multiplier"]:
-        set_layer_item(layer_item, key=key, feature=feature,
-                       is_compound_datatype=True)
+      if feature["mean_quantizer"]:
+        layer_item["mean_quantizer"] = populate_quantizer(
+            feature["mean_quantizer"])
+
+      if feature["variance_quantizer"]:
+        layer_item["variance_quantizer"] = populate_quantizer(
+            feature["variance_quantizer"])
+
+      if feature["internal_divide_quantizer"]:
+        layer_item["internal_divide_quantizer"] = populate_quantizer(
+            feature["internal_divide_quantizer"].output,
+            implemented_as=feature[
+                "internal_divide_quantizer"].implemented_as())
+
+      if feature["internal_multiplier"]:
+        layer_item["internal_multiplier"] = populate_quantizer(
+            feature["internal_multiplier"].output,
+            implemented_as=feature[
+                "internal_multiplier"].implemented_as())
+
+      if feature["internal_accumulator"]:
+        layer_item["internal_accumulator"] = populate_quantizer(
+            feature["internal_accumulator"].output,
+            implemented_as=feature["internal_accumulator"].implemented_as())
+
+      if feature["output_quantizer"]:
+        layer_item["output_quantizer"] = populate_quantizer(
+            feature["output_quantizer"], shape=feature["output_shapes"])
 
     else:
       # populate the feature to dictionary
-      set_layer_item(layer_item, key="weight_quantizer", feature=feature,
-                     shape=qtools_util.get_val(feature, "w_shapes"))
-      set_layer_item(layer_item, key="bias_quantizer", feature=feature,
-                     shape=qtools_util.get_val(feature, "b_shapes"))
+      layer_item["input_quantizer_list"] = [
+          populate_quantizer(q) for q in feature.input_quantizer_list]
 
-      output_key_name = None
-      if qtools_util.is_merge_layers(layer):
-        output_key_name = layer.__class__.__name__ + "_quantizer"
-      set_layer_item(layer_item, key="multiplier", feature=feature,
-                     is_compound_datatype=True,
-                     output_key_name=output_key_name)
-      set_layer_item(layer_item, key="accumulator", feature=feature,
-                     is_compound_datatype=True)
+      tmp = populate_quantizer(feature.weight_quantizer, feature.w_shapes)
+      if bool(tmp):
+        layer_item["weight_quantizer"] = tmp
 
-      if qtools_util.get_val(feature, "fused_accumulator"):
-        # Add fused weights to the dictionary
-        for key in ["bn_beta_quantizer", "bn_mean_quantizer",
-                    "bn_inverse_quantizer"]:
-          set_layer_item(layer_item, key=key, feature=feature)
+      tmp = populate_quantizer(feature.bias_quantizer, feature.b_shapes)
+      if bool(tmp):
+        layer_item["bias_quantizer"] = tmp
 
-        set_layer_item(layer_item, key="fused_accumulator", feature=feature,
-                       is_compound_datatype=True)
+      if feature.multiplier:
+        method = feature.multiplier.implemented_as()
+        tmp = populate_quantizer(
+            feature.multiplier.output,
+            implemented_as=method)
+        if bool(tmp):
+          if qtools_util.is_merge_layers(layer):
+            qname = layer.__class__.__name__ + "_quantizer"
+            layer_item[qname] = tmp
+          else:
+            layer_item["multiplier"] = tmp
 
-    layer_item["operation_count"] = qtools_util.get_val(
-        feature, "operation_count")
+      if feature.accumulator:
+        tmp = populate_quantizer(
+            feature.accumulator.output,
+            implemented_as=feature.accumulator.implemented_as())
+        if bool(tmp):
+          layer_item["accumulator"] = tmp
+
+      tmp = populate_quantizer(feature.output_quantizer,
+                               feature.output_shapes)
+      if bool(tmp):
+        layer_item["output_quantizer"] = tmp
+
+      layer_item["operation_count"] = feature.operation_count
+
     output_dict[layer.name] = layer_item
 
   return output_dict

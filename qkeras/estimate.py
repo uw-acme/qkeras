@@ -569,22 +569,10 @@ def extract_model_operations(in_model):
 
     elif layer.__class__.__name__ in ["QDense"]:
 
-      # Find the input and output shapes out of all possible dimensions.
-      # Usually the first shape dimension will be the batch size, and the second
-      # shape dimension will be the number of channels. However, if the
-      # Dense layer is in Squeeze-and-Excite, the first shape dimension
-      # will be the batch size, the second and third shape dimension will be the
-      # spatial sizes (should both be 1), and the fourth shape dimensions will
-      # be the number of channels
-      ishape = np.array([i for i in input_shape if i is not None])
-      assert sum(ishape > 1) == 1, "Tensor shape has multiple >1 size dims"
-      size_i = np.max(ishape)
+      _, size_i = input_shape
+      _, size_o = output_shape
 
-      oshape = np.array([i for i in output_shape if i is not None])
-      assert sum(oshape > 1) == 1, "Tensor shape has multiple >1 size dims"
-      size_o = np.max(oshape)
-
-      number_of_operations = int(size_i * size_o)
+      number_of_operations = (size_i * size_o)
 
       number_of_weights = size_i * size_o
       number_of_bias = 0
@@ -647,28 +635,22 @@ def print_qstats(model):
 
   print("")
   print("Weight profiling:")
-  total_bits = 0
   for name in sorted(model_ops):
     weight_type = model_ops[name]["type_of_weights"]
     n_weights = model_ops[name]["number_of_weights"]
     if isinstance(weight_type, list):
       for i, (w_type, w_number) in enumerate(zip(weight_type, n_weights)):
         _, w_sizes, _ = w_type
-        total_bits += w_number * w_sizes
         print("    {:30} : {:5} ({}-bit unit)".format(
             str(name) + "_weights_" + str(i), str(w_number), str(w_sizes)))
     else:
       _, w_sizes, _ = weight_type
-      total_bits += n_weights * w_sizes
       print("    {:30} : {:5} ({}-bit unit)".format(
           str(name) + "_weights", str(n_weights), str(w_sizes)))
     _, b_sizes, _ = model_ops[name]["type_of_bias"]
     b_number = model_ops[name]["number_of_bias"]
-    total_bits += b_number * b_sizes
     print("    {:30} : {:5} ({}-bit unit)".format(
         str(name) + "_bias", str(b_number), str(b_sizes)))
-  print("    " + ("-"*40))
-  print("    {:30} : {:5}".format("Total Bits", total_bits))
 
   print("")
   print("Weight sparsity:")
