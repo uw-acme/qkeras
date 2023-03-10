@@ -33,7 +33,8 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import smart_cond as tf_utils
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.ops import nn
+# from tensorflow.python.ops import nn
+from tensorflow.compat.v2 import nn
 from .qlayers import Clip
 from .qlayers import get_auto_range_constraint_initializer
 from .qlayers import get_quantizer
@@ -339,7 +340,6 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
                  epsilon=1e-3,
                  center=True,
                  scale=True,
-                 activation=None,
                  beta_initializer='zeros',
                  gamma_initializer='ones',
                  beta_regularizer=None,
@@ -362,7 +362,6 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
 
         self.gamma_range = gamma_range
         self.beta_range = beta_range
-        self.activation = activation
 
         self.beta_quantizer = beta_quantizer
         self.gamma_quantizer = gamma_quantizer
@@ -420,7 +419,7 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
             gamma_constraint=gamma_constraint,
             **kwargs)
 
-    def call(self, inputs, training=None):
+    def call(self, inputs):
 
         if self.scale and self.gamma_quantizer:
             quantized_gamma = self.gamma_quantizer_internal(self.gamma)
@@ -452,6 +451,12 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
         broadcast_shape = [1] * ndims
         for dim in self.axis:
             broadcast_shape[dim] = input_shape.dims[dim].value
+        # input_dtype = inputs.dtype
+        # if input_dtype in ('float16', 'bfloat16') and self.dtype == 'float32':
+        #     # If mixed precision is used, cast inputs to float32 so that this is at
+        #     # least as numerically stable as the fused version.
+        #     inputs = tf.cast(inputs, 'float32')
+        #     print(1)
 
         def _broadcast(v):
             if (v is not None and len(v.shape) != ndims and self.axis != [ndims - 1]):
@@ -465,8 +470,9 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
         if scale is not None:
             scale = math_ops.cast(scale, inputs.dtype)
 
-        keep_dims = len(self.axis) > 1
-        mean, variance = tf.compat.v1.nn.moments(inputs, self.axis, keep_dims=keep_dims)
+        # keep_dims = len(self.axis) > 1
+        # mean, variance = tf.compat.v1.nn.moments(inputs, self.axis, keep_dims=keep_dims)
+        mean, variance = tf.nn.moments(inputs, self.axis, keepdims=True)
 
         # Quantized mean and variance
         if self.mean_quantizer:
@@ -485,10 +491,14 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
         outputs = nn.batch_normalization(inputs,
                                          quantized_mean,
                                          quantized_variance,
-                                         offset,
-                                         scale,
-                                         self.epsilon)
+                                         offset=offset,
+                                         scale=scale,
+                                         variance_epsilon=self.epsilon)
+        # print(input_shape)
+        # print(outputs.shape)
+        # outputs.set_shape(input_shape)
         outputs.set_shape(input_shape)
+        # print(outputs.shape)
 
         return outputs
 
@@ -498,24 +508,12 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
             'epsilon': self.epsilon,
             'center': self.center,
             'scale': self.scale,
-            'beta_quantizer': constraints.serialize(
-                self.beta_quantizer_internal, use_legacy_format=True
-            ),
-            'gamma_quantizer': constraints.serialize(
-                self.gamma_quantizer_internal, use_legacy_format=True
-            ),
-            'mean_quantizer': constraints.serialize(
-                self.mean_quantizer_internal, use_legacy_format=True
-            ),
-            'variance_quantizer': constraints.serialize(
-                self.variance_quantizer_internal, use_legacy_format=True
-            ),
-            'beta_initializer': initializers.serialize(
-                self.beta_initializer, use_legacy_format=True
-            ),
-            'gamma_initializer': initializers.serialize(
-                self.gamma_initializer, use_legacy_format=True
-            ),
+            'beta_quantizer': constraints.serialize(self.beta_quantizer_internal),
+            'gamma_quantizer': constraints.serialize(self.gamma_quantizer_internal),
+            'mean_quantizer': constraints.serialize(self.mean_quantizer_internal),
+            'variance_quantizer': constraints.serialize(self.variance_quantizer_internal),
+            'beta_initializer': initializers.serialize(self.beta_initializer),
+            'gamma_initializer': initializers.serialize(self.gamma_initializer),
             # 'moving_mean_initializer': initializers.serialize(
             #     self.moving_mean_initializer, use_legacy_format=True
             # ),
@@ -525,22 +523,14 @@ class QLayerNormalization(LayerNormalization, PrunableLayer):
             # 'inverse_quantizer': initializers.serialize(
             #     self.inverse_quantizer_internal, use_legacy_format=True
             # ),
-            'beta_regularizer': regularizers.serialize(
-                self.beta_regularizer, use_legacy_format=True
-            ),
-            'gamma_regularizer': regularizers.serialize(
-                self.gamma_regularizer, use_legacy_format=True
-            ),
-            'beta_constraint': constraints.serialize(
-                self.beta_constraint, use_legacy_format=True
-            ),
-            'gamma_constraint': constraints.serialize(
-                self.gamma_constraint, use_legacy_format=True
-            ),
+            'beta_regularizer': regularizers.serialize(self.beta_regularizer),
+            'gamma_regularizer': regularizers.serialize(self.gamma_regularizer),
+            'beta_constraint': constraints.serialize(self.beta_constraint),
+            'gamma_constraint': constraints.serialize(self.gamma_constraint),
             'beta_range': self.beta_range,
             'gamma_range': self.gamma_range,
         }
-        base_config = super(QBatchNormalization, self).get_config()
+        base_config = super(QLayerNormalization, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
     def compute_output_shape(self, input_shape):
