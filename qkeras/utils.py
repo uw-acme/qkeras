@@ -41,6 +41,8 @@ from .qconv2d_batchnorm import QConv2DBatchnorm
 from .qdepthwiseconv2d_batchnorm import QDepthwiseConv2DBatchnorm
 from .qlayers import QActivation
 from .qlayers import QAdaptiveActivation
+from .qlayers import QEinsumDense
+from .qlayers import QMultiHeadAttention
 from .qpooling import QAveragePooling2D
 from .qlayers import QDense
 from .qlayers import QInitializer
@@ -69,6 +71,7 @@ from .quantizers import quantized_relu
 from .quantizers import quantized_ulaw
 from .quantizers import quantized_tanh
 from .quantizers import quantized_sigmoid
+from .quantizers import quantized_softmax
 from .quantizers import quantized_po2
 from .quantizers import quantized_relu_po2
 from .quantizers import stochastic_binary
@@ -87,6 +90,8 @@ REGISTERED_LAYERS = [
     "QSeparableConv2D",
     "QDepthwiseConv2D",
     "QConv2DTranspose",
+    "QEinsumDense",
+    "QMultiHeadAttention",
     "QSimpleRNN",
     "QLSTM",
     "QGRU",
@@ -236,6 +241,8 @@ def quantize_activation(layer_config, activation_bits):
     layer_config["activation"] = "quantized_tanh(" + str_act_bits + ")"
   elif a_name == "sigmoid":
     layer_config["activation"] = "quantized_sigmoid(" + str_act_bits + ")"
+  elif a_name == "softmax":
+    layer_config["activation"] = "quantized_softmax(" + str_act_bits +")"
 
 
 def get_config(quantizer_config, layer, layer_class, parameter=None):
@@ -859,6 +866,8 @@ def _add_supported_quantized_objects(custom_objects):
   custom_objects["QSimpleRNN"] = QSimpleRNN
   custom_objects["QLSTMCell"] = QLSTMCell
   custom_objects["QLSTM"] = QLSTM
+  custom_objects["QEinsumDense"] = QEinsumDense
+  custom_objects["QMultiHeadAttention"] = QMultiHeadAttention
   custom_objects["QGRUCell"] = QGRUCell
   custom_objects["QGRU"] = QGRU
   custom_objects["QBidirectional"] = QBidirectional
@@ -882,6 +891,7 @@ def _add_supported_quantized_objects(custom_objects):
   custom_objects["quantized_sigmoid"] = quantized_sigmoid
   custom_objects["quantized_po2"] = quantized_po2
   custom_objects["quantized_relu_po2"] = quantized_relu_po2
+  custom_objects["quantized_softmax"] = quantized_softmax
   
 
   custom_objects["QConv2DBatchnorm"] = QConv2DBatchnorm
@@ -1019,6 +1029,8 @@ def get_model_sparsity(model, per_layer=False, allow_list=None):
   if allow_list is None:
     allow_list = [
         "QDense", "Dense", "QConv1D", "Conv1D", "QConv2D", "Conv2D",
+        "QMultiHeadAttention", "MultiHeadAttention",
+        "QEinsumDense", "EinsumDense",
         "QDepthwiseConv2D", "DepthwiseConv2D",
         "QSeparableConv1D", "SeparableConv1D",
         "QSeparableConv2D", "SeparableConv2D", "QOctaveConv2D",
@@ -1113,7 +1125,8 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None, batch_si
     if alpha != 1.0:
       print(" a[{: 8.4f} {:8.4f}]".format(np.min(alpha), np.max(alpha)))
     if plot and layer.__class__.__name__ in [
-        "QConv1D", "QConv2D", "QConv2DTranspose", "QDense", "QActivation",
+        "QConv1D", "QConv2D", "QMultiHeadAttention","QEinsumDense",
+        "QConv2DTranspose", "QDense", "QActivation",
         "QAdaptiveActivation", "QSimpleRNN", "QLSTM", "QGRU", "QBidirectional",
         "QSeparableConv1D", "QSeparableConv2D"
     ]:
@@ -1134,6 +1147,7 @@ def quantized_model_debug(model, X_test, plot=False, plt_instance=None, batch_si
         if i == 0 and layer.__class__.__name__ in [
             "QConv1D", "QConv2D", "QConv2DTranspose", "QDense",
             "QSimpleRNN", "QLSTM", "QGRU",
+            "QMultiHeadAttention", "QEinsumDense",
             "QSeparableConv1D", "QSeparableConv2D",
             "QConv2DBatchnorm", "QDenseBatchnorm", "QDepthwiseConv2DBatchnorm"
         ]:

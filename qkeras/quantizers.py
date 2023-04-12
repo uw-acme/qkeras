@@ -22,8 +22,10 @@ import re
 import numpy as np
 import tensorflow.compat.v2 as tf
 import tensorflow.keras.backend as K
+from tensorflow.python.keras import backend as K2
 from six.moves import range
 from tensorflow.keras import initializers
+from tensorflow.python.ops import math_ops
 from tensorflow.keras.utils import deserialize_keras_object
 from tensorflow.python.framework import smart_cond as tf_utils
 from .safe_eval import safe_eval
@@ -1511,8 +1513,7 @@ class quantized_relu(BaseQuantizer):  # pylint: disable=invalid-name
         neg_factor = 1 / (self.negative_slope * m)
         xq = xq + m_i * self.negative_slope * tf.keras.backend.clip(
             2.0 * (_round_through(p * self.negative_slope,
-                                  self.use_stochastic_rounding) * neg_factor) -
-            1.0, -1.0, 0.0)
+                                  self.use_stochastic_rounding) * neg_factor) -1.0, -1.0, 0.0)
     else:
       p = x * m / m_i
       xq = m_i * tf.keras.backend.clip(
@@ -1520,8 +1521,7 @@ class quantized_relu(BaseQuantizer):  # pylint: disable=invalid-name
           1.0 - 1.0 / m)
       if self.negative_slope > 0:
         neg_factor = 1 / (self.negative_slope * m)
-        xq = xq + m_i * self.negative_slope * (
-            tf.keras.backend.clip(
+        xq = xq + m_i * self.negative_slope * (tf.keras.backend.clip(
                 _round_through(p * self.negative_slope,
                                self.use_stochastic_rounding) * neg_factor, -1.0,
                 0.0))
@@ -2388,6 +2388,72 @@ class quantized_hswish(quantized_bits):  # pylint: disable=invalid-name
         list(base_config.items()) + list(config.items()))
     return out_config
 
+class quantized_softmax(BaseQuantizer):
+
+
+  def __init__(self,
+               bits=8,
+               axis=-1,
+               var_name=None,
+               use_variables=False):
+    super(quantized_softmax, self).__init__()
+    self.bits=bits,
+    self.axis=axis,
+    self.var_name=var_name,
+    self.use_variables=use_variables
+
+  def __str__(self):
+    flags = [str(self.bits)]
+    return "quantized_softmax(" + ",".join(flags) + ")"
+
+  def __call__(self, x, mask):
+    if not self.built:
+      self.build(var_name=self.var_name, use_variables=self.use_variables)
+
+    x = K2.cast_to_floatx(x)
+    m = K2.cast_to_floatx(K2.pow(2, self.bits))
+
+    if mask is not None:
+      # Since mask is 1.0 for positions we want to keep and 0.0 for
+      # masked positions, this operation will create a tensor which is 0.0 for
+      # positions we want to attend and -1e.9 for masked positions.
+      adder = (1.0 - math_ops.cast(mask, x.dtype)) * (
+          _large_compatible_negative(x.dtype))
+
+      # Since we are adding it to the raw scores before the softmax, this is
+      # effectively the same as removing these entirely.
+      x += adder
+
+    print(self.axis)
+    if isinstance(self.axis, (tuple, list)):
+      if len(self.axis) > 1:
+        p = math_ops.exp(x - math_ops.reduce_logsumexp(
+          x, axis=self.axis, keepdims=True))
+      else:
+        p = K2.softmax(x, axis=self.axis[0][0])
+    else:
+      p = K2.softmax(x, axis=self.axis)
+
+    return tf.keras.backend.clip(tf.round(p * m), 0.0, 1.0 - (1.0 / m))
+
+
+  def max(self):
+      """Get the maximum value that quantized_softmax can represent."""
+      return (1.0 - (1.0 / pow(2, self.bits)))
+
+  def min(self):
+    """Get the minimum value that quantized_softmax can represent."""
+    return 0.0
+
+  @classmethod
+  def from_config(cls, config):
+    return cls(**config)
+
+  def get_config(self):
+    config = {
+        "bits": self.bits,
+    }
+    return config
 
 def get_quantizer(identifier):
   """Gets the quantizer.
@@ -2441,3 +2507,4 @@ def get_quantized_initializer(w_initializer, w_range):
       return initializers.RandomUniform(-w_range, w_range)
 
   return w_initializer
+
