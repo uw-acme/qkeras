@@ -803,7 +803,7 @@ class QEinsumDense(Layer):
     # if self.bias is not None:
     #   ret += self.bias
 
-    print(self.activation)
+    # print(self.activation)
     if self.activation is not None:
       ret = self.activation(ret)
 
@@ -1120,6 +1120,7 @@ class QMultiHeadAttention(Layer):
                use_bias=True,
                output_shape=None,
                attention_axes=None,
+               softmax_bits=16,
                kernel_initializer="glorot_uniform",
                bias_initializer="zeros",
                kernel_regularizer=None,
@@ -1154,6 +1155,7 @@ class QMultiHeadAttention(Layer):
     self._value_dim = value_dim if value_dim else key_dim
     self._dropout = dropout
     self._use_bias = use_bias
+    self._softmax_bits = softmax_bits
     self._output_shape = output_shape
     self._kernel_regularizer = regularizers.get(kernel_regularizer)
     self._bias_regularizer = regularizers.get(bias_regularizer)
@@ -1376,7 +1378,7 @@ class QMultiHeadAttention(Layer):
         _build_attention_equation(rank, attn_axes=self._attention_axes))
     norm_axes = tuple(
         range(attn_scores_rank - len(self._attention_axes), attn_scores_rank))
-    self._softmax = get_quantizer(quantized_softmax(axis=norm_axes))
+    self._softmax = get_quantizer(quantized_softmax(bits=self._softmax_bits, axis=norm_axes))
     self._dropout_layer = core.Dropout(rate=self._dropout)
 
   def _masked_softmax(self, attention_scores, attention_mask=None):

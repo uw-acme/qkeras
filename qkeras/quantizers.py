@@ -2406,9 +2406,10 @@ class quantized_softmax(BaseQuantizer):
     flags = [str(self.bits)]
     return "quantized_softmax(" + ",".join(flags) + ")"
 
-  def __call__(self, x, mask):
+  def __call__(self, x, mask=None):
     if not self.built:
-      self.build(var_name=self.var_name, use_variables=self.use_variables)
+      self.build(var_name=self.var_name,
+                 use_variables=self.use_variables)
 
     x = K2.cast_to_floatx(x)
     m = K2.cast_to_floatx(K2.pow(2, self.bits))
@@ -2424,22 +2425,28 @@ class quantized_softmax(BaseQuantizer):
       # effectively the same as removing these entirely.
       x += adder
 
-    print(self.axis)
+    #print(self.axis)
     if isinstance(self.axis, (tuple, list)):
+      self.axis = self.axis[0]
+    if isinstance(self.axis, (tuple, list)):
+
       if len(self.axis) > 1:
         p = math_ops.exp(x - math_ops.reduce_logsumexp(
           x, axis=self.axis, keepdims=True))
       else:
-        p = K2.softmax(x, axis=self.axis[0][0])
+        p = K2.softmax(x, axis=self.axis[0])
     else:
       p = K2.softmax(x, axis=self.axis)
 
-    return tf.keras.backend.clip(tf.round(p * m), 0.0, 1.0 - (1.0 / m))
+    #return tf.keras.backend.clip((p * m), 0.0, 1.0 - (1.0 / m))
+    p_quant = tf.keras.backend.round(p * m) / m
+    p_ste = p + tf.stop_gradient(p_quant - p)
+    return p_ste
 
 
   def max(self):
       """Get the maximum value that quantized_softmax can represent."""
-      return (1.0 - (1.0 / pow(2, self.bits)))
+      return (1.0 - (1.0 / K2.pow(2, self.bits)))
 
   def min(self):
     """Get the minimum value that quantized_softmax can represent."""
