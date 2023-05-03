@@ -264,6 +264,22 @@ def stochastic_round(x, precision=0.5):
   return result / scale
 
 
+def _large_compatible_negative(tensor_type):
+  """Large negative number as Tensor.
+
+  This function is necessary because the standard value for epsilon
+  in this module (-1e9) cannot be represented using tf.float16
+
+  Args:
+    tensor_type: a dtype to determine the type.
+
+  Returns:
+    a large negative number.
+  """
+  if tensor_type == dtypes.float16:
+    return dtypes.float16.min
+  return -1e9
+
 def stochastic_round_po2(x):
   """Performs stochastic rounding for the power of two."""
   # TODO(hzhuang): test stochastic_round_po2 and constraint.
@@ -2440,7 +2456,9 @@ class quantized_softmax(BaseQuantizer):
 
     #return tf.keras.backend.clip((p * m), 0.0, 1.0 - (1.0 / m))
     p_quant = tf.keras.backend.round(p * m) / m
+    #p_quant = stochastic_round(p * m, precision=1.0) / m
     p_ste = p + tf.stop_gradient(p_quant - p)
+
     return p_ste
 
 
