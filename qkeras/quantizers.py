@@ -2454,7 +2454,7 @@ class quantized_softmax(BaseQuantizer):
     else:
       p = K2.softmax(x, axis=self.axis)
 
-    #return tf.keras.backend.clip((p * m), 0.0, 1.0 - (1.0 / m))
+    #return tf.keras.backend.clip(tf.round(p * m), 0.0, 1.0 - (1.0 / m))
     p_quant = tf.keras.backend.round(p * m) / m
     #p_quant = stochastic_round(p * m, precision=1.0) / m
     p_ste = p + tf.stop_gradient(p_quant - p)

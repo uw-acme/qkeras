@@ -536,7 +536,7 @@ def model_quantize(model,
 
     if layer["class_name"] in [
       "Dense", "Conv1D", "Conv2D", "Conv2DTranspose",
-      "SeparableConv1D", "SeparableConv2D"
+      "SeparableConv1D", "SeparableConv2D", "MultiHeadAttention"
     ]:
       if (layer["class_name"] in ["Dense", "Conv2D"] and enable_bn_folding and
           layer["name"] in layers_to_fold):

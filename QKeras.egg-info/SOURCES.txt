@@ -19,7 +19,9 @@ qkeras/qconv2d_batchnorm.py
 qkeras/qconvolutional.py
 qkeras/qdense_batchnorm.py
 qkeras/qdepthwiseconv2d_batchnorm.py
+qkeras/qeinsum_dense.py
 qkeras/qlayers.py
+qkeras/qmulti_head_attention.py
 qkeras/qnormalization.py
 qkeras/qoctave.py
 qkeras/qpooling.py
